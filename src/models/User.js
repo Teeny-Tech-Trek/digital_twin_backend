@@ -1,3 +1,4 @@
+// models/User.js
 import mongoose from "mongoose";
 
 const userSchema = new mongoose.Schema(
@@ -7,6 +8,10 @@ const userSchema = new mongoose.Schema(
     password: { type: String },
     googleId: { type: String },
     avatar: { type: String },
+    profilePicture: { 
+      type: String,
+      default: null 
+    },
   },
   { timestamps: true }
 );

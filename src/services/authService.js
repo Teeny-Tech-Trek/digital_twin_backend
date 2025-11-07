@@ -1,3 +1,4 @@
+// services/authService.js
 import bcrypt from "bcryptjs";
 import User from "../models/User.js";
 import { generateToken } from "../utils/generateToken.js";
@@ -29,4 +30,20 @@ export const googleLogin = async ({ googleId, name, email, avatar }) => {
 
   const token = generateToken(user._id);
   return { user, token };
+};
+
+export const updateProfilePicture = async (userId, profilePictureUrl) => {
+  const user = await User.findByIdAndUpdate(
+    userId,
+    { profilePicture: profilePictureUrl },
+    { new: true }
+  );
+  if (!user) throw new Error("User not found");
+  return user;
+};
+
+export const getUserProfile = async (userId) => {
+  const user = await User.findById(userId).select('-password');
+  if (!user) throw new Error("User not found");
+  return user;
 };

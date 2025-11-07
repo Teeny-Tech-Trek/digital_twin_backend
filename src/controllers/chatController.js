@@ -11,10 +11,12 @@ export const sendMessage = asyncHandler(async (req, res) => {
 
   const reply = await chatService.chatWithDigitalTwin(twinId, messages, userEmail);
 
-  // Create a lead if the message indicates interest
+  // Enhanced lead creation: Only if qualified interest
   const lastMessage = messages[messages.length - 1].content.toLowerCase();
-  if (lastMessage.includes("interested") || lastMessage.includes("contact") || lastMessage.includes("business")) {
-    await leadService.createLead(twinId, userEmail, lastMessage);
+  const interestKeywords = ["interested", "contact", "business", "partnership", "collaborate"];
+  if (interestKeywords.some((kw) => lastMessage.includes(kw))) {
+    // Placeholder for basic lead; full form comes via /leads endpoint
+    await leadService.createLead(twinId, userEmail, lastMessage, { name: "Anonymous", phone: "", company: "N/A" });
   }
 
   res.json({ success: true, reply });
