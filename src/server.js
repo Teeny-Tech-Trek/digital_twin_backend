@@ -59,18 +59,50 @@ const authLimiter = rateLimit({
 });
 
 // ✅ CORS Configuration
+//
+// Three categories of allowed origin:
+//   1. Hardcoded production hosts (NetTwin's known domains).
+//   2. process.env.CLIENT_URL — the primary frontend URL for this env.
+//   3. process.env.ADDITIONAL_ALLOWED_ORIGINS — comma-separated escape hatch
+//      for ad-hoc URLs (preview deploys, partner integrations, etc.) without
+//      a code change. Whitespace around commas is trimmed.
+//   4. Any localhost:<port> origin (covers Vite/CRA dev servers).
+const hardcodedOrigins = [
+  "https://nettwin-test.vercel.app",       // Vercel preview / staging
+  "https://nettwin.techtrekkers.ai",       // production frontend
+  "https://digitaltwin.techtrekkers.ai",   // legacy production frontend
+];
+
+const extraOrigins = (process.env.ADDITIONAL_ALLOWED_ORIGINS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 const allowedOrigins = [
   process.env.CLIENT_URL,
-  "https://digitaltwin.techtrekkers.ai",
+  ...hardcodedOrigins,
+  ...extraOrigins,
 ].filter(Boolean);
 
 const isLocalFrontend = (origin) =>
   /^https?:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin);
 
+// Some browsers send Origin with a trailing slash on a few embed scenarios.
+// Normalize both sides before comparing so a stray "/" doesn't reject a
+// legitimate request.
+const normalizeOrigin = (origin) =>
+  typeof origin === "string" ? origin.replace(/\/$/, "") : origin;
+const normalizedAllowed = new Set(allowedOrigins.map(normalizeOrigin));
+
 app.use(
   cors({
     origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin) || isLocalFrontend(origin)) {
+      const normalized = normalizeOrigin(origin);
+      if (
+        !origin ||
+        normalizedAllowed.has(normalized) ||
+        isLocalFrontend(origin)
+      ) {
         return callback(null, true);
       }
       return callback(new Error(`CORS blocked origin: ${origin}`));
