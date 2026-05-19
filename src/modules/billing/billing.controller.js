@@ -188,6 +188,15 @@ export const initializeBilling = asyncHandler(async (req, res) => {
  * to open the Razorpay checkout popup.
  */
 export const createOrder = asyncHandler(async (req, res) => {
+  // Defensive: a missing/non-JSON body would otherwise crash destructuring
+  // with a 500. Reject early with a clean 400.
+  if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) {
+    return res.status(400).json({
+      success: false,
+      error: "INVALID_REQUEST",
+      message: "Request body must be a JSON object with a 'planId' field",
+    });
+  }
   const { planId } = req.body;
   if (!planId) {
     throw createBillingError(

@@ -26,7 +26,18 @@ const quotaError = (res, { feature, used, limit }) =>
     redirectTo: "/billing",
   });
 
-/** Block twin creation when the user is at their plan's twinsLimit. */
+/**
+ * Block twin creation when the user is at their plan's twinsLimit.
+ *
+ * IMPORTANT: NetTwin's `POST /api/digital-twin/create` is an UPSERT — it
+ * doubles as both create and update. The quota only applies when a NEW
+ * resource would be created. If the user already has a twin, treat the
+ * request as an update and let it through, regardless of plan.
+ *
+ * (This also lines up with the current DigitalTwin schema, which has a
+ * `unique: true` constraint on `user`, so multi-twin per user isn't
+ * supported until that constraint is relaxed.)
+ */
 export const canCreateTwin = async (req, res, next) => {
   try {
     const user = await resolveUser(req);
@@ -36,7 +47,10 @@ export const canCreateTwin = async (req, res, next) => {
     const plan = getEffectivePlanLimits(user);
     const limit = plan.twinsLimit;
     if (limit === -1) return next(); // unlimited
+
     const used = await DigitalTwin.countDocuments({ user: user._id });
+    // Existing twin = upsert / update path, never blocked.
+    if (used >= 1 && used <= limit) return next();
     if (used >= limit) return quotaError(res, { feature: "Digital twin", used, limit });
     return next();
   } catch (error) {

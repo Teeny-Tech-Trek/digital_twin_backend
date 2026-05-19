@@ -3,21 +3,65 @@ import asyncHandler from "express-async-handler";
 import * as chatService from "../services/chatService.js";
 import * as leadService from "../services/leadService.js";
 
+/**
+ * POST /api/chat
+ * Public chatbot endpoint. The visitor sends:
+ *   { twinId, userEmail, messages: [{role, content}, ...] }
+ * We answer as the twin owner, grounded in their profile.
+ */
 export const sendMessage = asyncHandler(async (req, res) => {
-  const { twinId, messages, userEmail } = req.body;
-  if (!twinId || !messages || !userEmail) {
-    throw new Error("Missing required fields: twinId, messages, or userEmail");
+  const body = req.body || {};
+  const { twinId, messages, userEmail } = body;
+
+  // Explicit 400 with field-level detail. Throwing a plain Error without a
+  // status code falls through to Express's default handler as a 500, which
+  // is wrong for client input errors.
+  const missing = [];
+  if (!twinId) missing.push("twinId");
+  if (!userEmail) missing.push("userEmail");
+  if (!Array.isArray(messages) || messages.length === 0) missing.push("messages");
+  if (missing.length) {
+    return res.status(400).json({
+      success: false,
+      error: "VALIDATION_ERROR",
+      message: `Missing required fields: ${missing.join(", ")}`,
+    });
   }
 
-  const reply = await chatService.chatWithDigitalTwin(twinId, messages, userEmail);
+  let reply;
+  try {
+    reply = await chatService.chatWithDigitalTwin(twinId, messages, userEmail);
+  } catch (error) {
+    const status = error.statusCode || 500;
+    return res.status(status).json({
+      success: false,
+      error: status === 404 ? "TWIN_NOT_FOUND" : "CHAT_FAILED",
+      message: error.message || "Chat failed",
+    });
+  }
 
-  // Enhanced lead creation: Only if qualified interest
-  const lastMessage = messages[messages.length - 1].content.toLowerCase();
-  const interestKeywords = ["interested", "contact", "business", "partnership", "collaborate"];
+  // Optional auto-lead capture when the visitor signals partnership intent.
+  // Failure here MUST NOT break the chat reply — the lead capture is a
+  // best-effort side-effect, not part of the chat contract.
+  const interestKeywords = [
+    "interested",
+    "contact",
+    "partnership",
+    "collaborate",
+    "investment",
+  ];
+  const lastMessage = String(messages[messages.length - 1]?.content || "").toLowerCase();
   if (interestKeywords.some((kw) => lastMessage.includes(kw))) {
-    // Placeholder for basic lead; full form comes via /leads endpoint
-    await leadService.createLead(twinId, userEmail, lastMessage, { name: "Anonymous", phone: "", company: "N/A" });
+    try {
+      await leadService.createLead(twinId, userEmail, lastMessage, {
+        name: "Anonymous (chat)",
+        phone: "",
+        company: "N/A",
+      });
+    } catch (leadError) {
+      console.warn("[CHAT] auto-lead capture failed:", leadError.message);
+    }
   }
 
-  res.json({ success: true, reply });
+  return res.json({ success: true, reply });
 });

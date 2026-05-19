@@ -117,6 +117,15 @@ class GoogleOAuthService {
           user.name = name;
         }
 
+        // Google has already verified the email — promote the user's
+        // emailVerified flag so downstream features that gate on it (paid
+        // upgrade, password reset paths) recognise the email as verified.
+        // Previously a password user who never opened the verification
+        // email could log in via Google but stay flagged as unverified.
+        if (email_verified && !user.emailVerified) {
+          user.emailVerified = true;
+        }
+
         await user.save();
 
         return {
