@@ -126,7 +126,12 @@ app.use(
     cookie: {
       secure: process.env.NODE_ENV === 'production',
       httpOnly: true,
-      sameSite: 'strict',
+      // 'lax' instead of 'strict' so the session cookie survives top-level
+      // returns from OAuth/email flows. Passport session is still only used
+      // for backward compatibility — JWT is the real auth — but mismatched
+      // SameSite between session and refreshToken cookies caused subtle
+      // logout-on-back-button bugs in prod.
+      sameSite: 'lax',
       maxAge: 24 * 60 * 60 * 1000 // 24 hours
     }
   })

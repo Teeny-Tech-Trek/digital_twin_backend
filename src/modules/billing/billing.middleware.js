@@ -29,14 +29,25 @@ const quotaError = (res, { feature, used, limit }) =>
 /**
  * Block twin creation when the user is at their plan's twinsLimit.
  *
- * IMPORTANT: NetTwin's `POST /api/digital-twin/create` is an UPSERT — it
- * doubles as both create and update. The quota only applies when a NEW
- * resource would be created. If the user already has a twin, treat the
- * request as an update and let it through, regardless of plan.
+ * `POST /api/digital-twin/create` is now a TRUE create (the controller used
+ * to upsert, which made the quota meaningless — every "Create another"
+ * silently overwrote the existing twin). With the controller fixed and the
+ * unique-on-user index dropped, this check is the single source of truth
+ * for "can this user create one more twin?":
  *
- * (This also lines up with the current DigitalTwin schema, which has a
- * `unique: true` constraint on `user`, so multi-twin per user isn't
- * supported until that constraint is relaxed.)
+ *   free plan → twinsLimit 1  →  block once they own 1
+ *   pro plan  → twinsLimit 10 →  block once they own 10
+ *   limit === -1 → unlimited  →  always allow
+ *
+ * Edits to an existing twin do NOT come through this route — they go
+ * through PATCH /section (or future PUT /:id) which is not gated, so a
+ * paid user updating their 7th twin still works regardless of quota.
+ *
+ * Race-safety note: between this count and the controller's insert,
+ * another request from the same user could create a twin concurrently and
+ * push us over the limit by one. For the FE-driven flow this is acceptable
+ * (clicks are user-paced). If we ever expose programmatic bulk creation,
+ * add a transaction or post-insert recount-and-rollback.
  */
 export const canCreateTwin = async (req, res, next) => {
   try {
@@ -49,9 +60,9 @@ export const canCreateTwin = async (req, res, next) => {
     if (limit === -1) return next(); // unlimited
 
     const used = await DigitalTwin.countDocuments({ user: user._id });
-    // Existing twin = upsert / update path, never blocked.
-    if (used >= 1 && used <= limit) return next();
-    if (used >= limit) return quotaError(res, { feature: "Digital twin", used, limit });
+    if (used >= limit) {
+      return quotaError(res, { feature: "Digital twin", used, limit });
+    }
     return next();
   } catch (error) {
     console.error("[BILLING] canCreateTwin error:", error);

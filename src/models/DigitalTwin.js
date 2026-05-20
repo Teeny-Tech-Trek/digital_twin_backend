@@ -58,7 +58,13 @@ const linksSchema = new mongoose.Schema({
 
 const digitalTwinSchema = new mongoose.Schema(
   {
-    user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, unique: true },
+    // NOTE: removed `unique: true` to support multi-twin per user (plan-gated
+    // — see modules/billing/billing.middleware.js#canCreateTwin). The
+    // existing `user_1` unique index in the DB must be dropped separately
+    // via the migration script in scripts/migrations/2026-05-multi-twin.js
+    // — Mongoose will not drop an existing index just because the schema
+    // attribute changed.
+    user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     identity: {
       name: { type: String, required: true },
       role: { type: String, required: true },

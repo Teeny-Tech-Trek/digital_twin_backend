@@ -7,6 +7,41 @@ import emailService from '../services/emailService.js';
  * Handle HTTP requests and coordinate with auth services
  */
 
+// Centralized refresh-token cookie config.
+//
+// Why `sameSite: 'lax'` (was 'strict'):
+//   Production deploys FE on `nettwin.techtrekkers.ai` and API on
+//   `api.nettwin.techtrekkers.ai`. Even though these share the same
+//   registrable domain (eTLD+1), 'strict' is treated inconsistently across
+//   browsers for top-level navigation that lands on the FE after an external
+//   redirect (e.g. Google OAuth popup, email-link return, browser back from
+//   external site). 'lax' is the modern-SaaS default — cookie still travels
+//   on XHR/fetch (which is all we need for /auth/refresh from the FE) and
+//   on top-level GET navigations, but not on cross-site POSTs (CSRF safe).
+//
+// Why no `domain` attribute:
+//   Cookie is set on `api.nettwin...` host and only needs to travel back to
+//   that host. Setting `domain: '.techtrekkers.ai'` would leak it to sibling
+//   subdomains (ttt-payment-service, etc.) which is exactly what we DON'T
+//   want.
+const REFRESH_COOKIE_NAME = 'refreshToken';
+const refreshCookieOptions = () => ({
+  httpOnly: true,
+  secure: process.env.NODE_ENV === 'production',
+  sameSite: 'lax',
+  maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+  path: '/'
+});
+
+// clearCookie must match the original Set-Cookie's attributes (minus maxAge)
+// or browsers silently keep the stale cookie around.
+const refreshClearOptions = () => ({
+  httpOnly: true,
+  secure: process.env.NODE_ENV === 'production',
+  sameSite: 'lax',
+  path: '/'
+});
+
 /**
  * POST /api/auth/signup
  * Sign up with email and password
@@ -20,13 +55,7 @@ export const signup = asyncHandler(async (req, res) => {
     password
   });
 
-  // Set refresh token as httpOnly cookie
-  res.cookie('refreshToken', result.refreshToken, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
-    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
-  });
+  res.cookie(REFRESH_COOKIE_NAME, result.refreshToken, refreshCookieOptions());
 
   res.status(201).json({
     success: true,
@@ -48,13 +77,7 @@ export const login = asyncHandler(async (req, res) => {
     password
   });
 
-  // Set refresh token as httpOnly cookie
-  res.cookie('refreshToken', result.refreshToken, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
-    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
-  });
+  res.cookie(REFRESH_COOKIE_NAME, result.refreshToken, refreshCookieOptions());
 
   res.json({
     success: true,
@@ -81,13 +104,7 @@ export const googleAuth = asyncHandler(async (req, res) => {
     userAgent
   );
 
-  // Set refresh token as httpOnly cookie
-  res.cookie('refreshToken', result.refreshToken, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
-    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
-  });
+  res.cookie(REFRESH_COOKIE_NAME, result.refreshToken, refreshCookieOptions());
 
   res.json({
     success: true,
@@ -101,7 +118,21 @@ export const googleAuth = asyncHandler(async (req, res) => {
 
 /**
  * POST /api/auth/refresh
- * Refresh access token using refresh token from cookie
+ * Refresh access token using refresh token from cookie.
+ *
+ * Failure modes are all 401 with a stable error code so the FE axios
+ * interceptor can distinguish "session expired, clear state" from a generic
+ * 401 on some other endpoint:
+ *   - REFRESH_COOKIE_MISSING : no cookie present (probably first load, or
+ *                              SameSite blocked it — FE should not treat as
+ *                              an active logout).
+ *   - REFRESH_TOKEN_INVALID  : cookie present but decode/verify failed (FE
+ *                              must clear local session).
+ *   - REFRESH_TOKEN_REVOKED  : authService rejected (rotated already, or
+ *                              user logged out elsewhere) — same handling.
+ *
+ * Always clears the cookie on failure so a poisoned cookie doesn't keep
+ * triggering 401s on every page load.
  */
 export const refresh = asyncHandler(async (req, res) => {
   const refreshToken = req.cookies.refreshToken;
@@ -110,41 +141,58 @@ export const refresh = asyncHandler(async (req, res) => {
   if (!refreshToken) {
     return res.status(401).json({
       success: false,
+      code: 'REFRESH_COOKIE_MISSING',
       message: 'Refresh token required'
     });
   }
 
-  // Extract userId from token (without full verification)
-  // Full verification happens in authService
+  // We `decode` (not `verify`) only to read the `sub` claim so authService can
+  // look up the stored hash for that user. authService.refreshAccessToken
+  // performs the full signature + DB-hash verification — never trust this
+  // payload for authorization. If decode fails or sub is missing the token
+  // is malformed and we bail.
   const jwt = await import('jsonwebtoken');
-  const decoded = jwt.default.decode(refreshToken);
+  let decoded;
+  try {
+    decoded = jwt.default.decode(refreshToken);
+  } catch {
+    decoded = null;
+  }
 
   if (!decoded || !decoded.sub) {
+    res.clearCookie(REFRESH_COOKIE_NAME, refreshClearOptions());
     return res.status(401).json({
       success: false,
+      code: 'REFRESH_TOKEN_INVALID',
       message: 'Invalid refresh token'
     });
   }
 
-  const result = await authService.refreshAccessToken(
-    decoded.sub,
-    refreshToken,
-    ipAddress
-  );
+  try {
+    const result = await authService.refreshAccessToken(
+      decoded.sub,
+      refreshToken,
+      ipAddress
+    );
 
-  // Set new refresh token as httpOnly cookie
-  res.cookie('refreshToken', result.refreshToken, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
-    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
-  });
+    res.cookie(REFRESH_COOKIE_NAME, result.refreshToken, refreshCookieOptions());
 
-  res.json({
-    success: true,
-    message: 'Token refreshed',
-    accessToken: result.accessToken
-  });
+    return res.json({
+      success: true,
+      message: 'Token refreshed',
+      accessToken: result.accessToken
+    });
+  } catch (err) {
+    // Verification failed (signature, expiry, or hash mismatch in DB).
+    // Wipe the poisoned cookie so the next request lands in the
+    // REFRESH_COOKIE_MISSING branch instead of looping here.
+    res.clearCookie(REFRESH_COOKIE_NAME, refreshClearOptions());
+    return res.status(401).json({
+      success: false,
+      code: 'REFRESH_TOKEN_REVOKED',
+      message: err?.message || 'Refresh token revoked'
+    });
+  }
 });
 
 /**
@@ -156,12 +204,7 @@ export const logout = asyncHandler(async (req, res) => {
 
   await authService.logout(userId);
 
-  // Clear refresh token cookie
-  res.clearCookie('refreshToken', {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict'
-  });
+  res.clearCookie(REFRESH_COOKIE_NAME, refreshClearOptions());
 
   res.json({
     success: true,
@@ -286,11 +329,7 @@ export const changePassword = asyncHandler(async (req, res) => {
   );
 
   // Clear all refresh tokens (force re-login everywhere)
-  res.clearCookie('refreshToken', {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict'
-  });
+  res.clearCookie(REFRESH_COOKIE_NAME, refreshClearOptions());
 
   res.json({
     success: true,
