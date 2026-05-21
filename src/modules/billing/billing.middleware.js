@@ -26,49 +26,10 @@ const quotaError = (res, { feature, used, limit }) =>
     redirectTo: "/billing",
   });
 
-/**
- * Block twin creation when the user is at their plan's twinsLimit.
- *
- * `POST /api/digital-twin/create` is now a TRUE create (the controller used
- * to upsert, which made the quota meaningless — every "Create another"
- * silently overwrote the existing twin). With the controller fixed and the
- * unique-on-user index dropped, this check is the single source of truth
- * for "can this user create one more twin?":
- *
- *   free plan → twinsLimit 1  →  block once they own 1
- *   pro plan  → twinsLimit 10 →  block once they own 10
- *   limit === -1 → unlimited  →  always allow
- *
- * Edits to an existing twin do NOT come through this route — they go
- * through PATCH /section (or future PUT /:id) which is not gated, so a
- * paid user updating their 7th twin still works regardless of quota.
- *
- * Race-safety note: between this count and the controller's insert,
- * another request from the same user could create a twin concurrently and
- * push us over the limit by one. For the FE-driven flow this is acceptable
- * (clicks are user-paced). If we ever expose programmatic bulk creation,
- * add a transaction or post-insert recount-and-rollback.
- */
-export const canCreateTwin = async (req, res, next) => {
-  try {
-    const user = await resolveUser(req);
-    if (!user) {
-      return res.status(404).json({ success: false, message: "User not found" });
-    }
-    const plan = getEffectivePlanLimits(user);
-    const limit = plan.twinsLimit;
-    if (limit === -1) return next(); // unlimited
-
-    const used = await DigitalTwin.countDocuments({ user: user._id });
-    if (used >= limit) {
-      return quotaError(res, { feature: "Digital twin", used, limit });
-    }
-    return next();
-  } catch (error) {
-    console.error("[BILLING] canCreateTwin error:", error);
-    return res.status(500).json({ success: false, message: "Error checking twin quota" });
-  }
-};
+// canCreateTwin removed. Product decision: every user gets exactly one
+// twin regardless of plan. The unique index on DigitalTwin.user is the
+// enforcement mechanism; no middleware quota is needed. If multi-twin
+// support is ever reintroduced, restore the middleware from git history.
 
 /**
  * Resolve the twin-owner user from a request. Public chatbot/lead routes

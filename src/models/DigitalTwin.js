@@ -58,13 +58,16 @@ const linksSchema = new mongoose.Schema({
 
 const digitalTwinSchema = new mongoose.Schema(
   {
-    // NOTE: removed `unique: true` to support multi-twin per user (plan-gated
-    // — see modules/billing/billing.middleware.js#canCreateTwin). The
-    // existing `user_1` unique index in the DB must be dropped separately
-    // via the migration script in scripts/migrations/2026-05-multi-twin.js
-    // — Mongoose will not drop an existing index just because the schema
-    // attribute changed.
-    user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    // ONE TWIN PER USER. Enforced at the database level via this unique
+    // index. Application-layer enforcement (POST /create being an upsert)
+    // is a second line of defense — if a request races past the upsert
+    // check, Mongo still rejects with E11000.
+    //
+    // NOTE: if the previous multi-twin migration dropped the `user_1`
+    // index, Mongoose will recreate it on next boot. If the collection
+    // contains rows where a single user owns >1 twin, the index build
+    // will fail — clean up duplicates first.
+    user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, unique: true },
     identity: {
       name: { type: String, required: true },
       role: { type: String, required: true },
