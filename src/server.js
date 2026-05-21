@@ -34,8 +34,22 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // ✅ Security Middleware
-// Helmet helps secure Express apps by setting various HTTP headers
-app.use(helmet());
+// Helmet helps secure Express apps by setting various HTTP headers.
+//
+// We override the default Cross-Origin-Resource-Policy ('same-origin') to
+// 'cross-origin' because the FE (e.g. https://nettwin.techtrekkers.ai) and
+// API (https://api.nettwin.techtrekkers.ai) are on different origins, and
+// the FE embeds user-uploaded images served from `/uploads` via <img>.
+// With the default CORP, Chrome blocks those <img> requests with
+// ERR_BLOCKED_BY_RESPONSE.NotSameOrigin even though CORS is configured —
+// CORP is a separate browser policy that applies to no-cors subresource
+// loads like images. 'cross-origin' is the correct policy for public
+// avatar files that are explicitly meant to be embedded elsewhere.
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+  })
+);
 
 // ✅ Body Parser
 app.use(express.json({ limit: '10mb' }));
@@ -115,7 +129,30 @@ app.use(
 );
 
 // ✅ Static file serving
-app.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));
+//
+// /uploads holds profile pictures embedded as <img src> on the FE origin.
+// Belt-and-braces with the global helmet override above: we explicitly stamp
+// `Cross-Origin-Resource-Policy: cross-origin` on every static response and
+// allow GET/HEAD from any origin. Adding `Access-Control-Allow-Origin: *`
+// here covers the case where the asset is fetched via `fetch()` (e.g. for
+// generating a downloadable QR / vCard) — `*` is safe because these files
+// are public and there's no cookie context.
+app.use(
+  "/uploads",
+  (req, res, next) => {
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+    next();
+  },
+  express.static(path.join(__dirname, "..", "uploads"), {
+    // Short cache so a replaced avatar surfaces quickly. The FE also
+    // appends `?v=<timestamp>` after an upload, which already guarantees
+    // a fresh fetch — this is just the secondary guard.
+    maxAge: "1h",
+    fallthrough: true,
+  })
+);
 
 // ✅ Session Setup (kept for backward compatibility with Passport)
 app.use(
