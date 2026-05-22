@@ -329,15 +329,23 @@ export const updateLocalSubscriptionState = async (userId, subscriptionData) => 
 
   const localLimits = PLAN_LIMITS[String(incomingSlug).toLowerCase()] || PLAN_LIMITS.pro;
 
+  // Activation opens a fresh usage window. currentPeriodStart anchors the
+  // message counter; limitNotifiedAt is cleared so the new window can
+  // re-notify if the user exhausts it.
+  const periodStart = new Date();
+  const periodEnd = subscriptionData.currentPeriodEnd
+    ? new Date(subscriptionData.currentPeriodEnd)
+    : new Date(periodStart.getTime() + 30 * 24 * 60 * 60 * 1000);
+
   user.subscription = {
     centralBillingCustomerId:
       subscriptionData.customerId ||
       user.subscription?.centralBillingCustomerId ||
       normalizedUserId,
     status: normalizedStatus,
-    currentPeriodEnd: subscriptionData.currentPeriodEnd
-      ? new Date(subscriptionData.currentPeriodEnd)
-      : user.subscription?.currentPeriodEnd || null,
+    currentPeriodStart: periodStart,
+    currentPeriodEnd: periodEnd,
+    limitNotifiedAt: null,
     lastSyncedAt: new Date(),
     planId: subscriptionData.planId || user.subscription?.planId || null,
   };

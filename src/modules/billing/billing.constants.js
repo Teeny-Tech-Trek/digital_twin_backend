@@ -38,50 +38,86 @@ export const CENTRAL_SERVICE_ENDPOINTS = {
   GET_PLANS: "/api/v1/plans",
 };
 
-// Subscription plan slugs. Only Free + Pro at launch; Enterprise reserved
-// for a future tier so the rest of the codebase can already reference it.
+// Subscription plan slugs. Four tiers at launch:
+//   free       — default for every signup (no payment)
+//   starter    — ₹999 / month
+//   pro        — ₹1,999 / month
+//   enterprise — contact sales (no Razorpay flow)
 export const SUBSCRIPTION_PLANS = {
   FREE: "free",
+  STARTER: "starter",
   PRO: "pro",
+  ENTERPRISE: "enterprise",
 };
 
 // NetTwin's local plan-limit map, keyed by slug. This is the authoritative
-// source for feature gating; TTT's Plan.seats/agentsLimit/propertiesLimit
-// columns are ignored for nettwin (kept null in the seeded TTT rows).
+// source for feature gating; TTT only stores name/slug/price/durationDays
+// for nettwin plans (NetTwin owns the feature semantics, TTT owns billing).
 //
-// Limit shape is NetTwin-native (twins / messages / leads), not real-estate
-// (agents / properties / seats). NetTwin is a single-user product, so
-// `seats` is always 1 and not exposed in the UI.
+// All plans give unlimited digital twins and unlimited lead capture.
+// Differentiation is on the chatbot-message quota only.
+//   Free       — 200 messages / month
+//   Starter    — 5,000 messages / month
+//   Pro        — 12,000 messages / month
+//   Enterprise — custom (limit = -1 once activated)
+//
+// Period is a rolling 30-day window starting at subscription activation
+// (or signup, for free users). See billing.utils.ensureCurrentBillingPeriod.
 export const PLAN_LIMITS = {
   [SUBSCRIPTION_PLANS.FREE]: {
     name: "Free",
     slug: "free",
     price: 0, // paise
     currency: "INR",
-    twinsLimit: 1,
-    messagesLimit: 50, // chatbot messages per billing period
-    leadsLimit: 10,
-    features: [
-      "1 digital twin",
-      "50 chatbot messages / month",
-      "10 leads captured",
-      "Public twin sharing",
-    ],
+    twinsLimit: -1, // unlimited digital twins
+    messagesLimit: 200, // chatbot messages per 30-day period
+    leadsLimit: -1, // unlimited leads
+    isContactOnly: false,
+    // `features` is the EXTRAS list — not a re-statement of the
+    // twin/message/lead limits, which the UI renders from their dedicated
+    // fields. Keep entries unique to each tier to avoid duplicate lines.
+    features: ["Public twin sharing", "QR code distribution"],
+  },
+  [SUBSCRIPTION_PLANS.STARTER]: {
+    name: "Starter",
+    slug: "starter",
+    price: 99900, // ₹999 in paise
+    currency: "INR",
+    twinsLimit: -1,
+    messagesLimit: 5000,
+    leadsLimit: -1,
+    isContactOnly: false,
+    features: ["Email support", "Lead export (CSV)"],
   },
   [SUBSCRIPTION_PLANS.PRO]: {
     name: "Pro",
     slug: "pro",
-    price: 49900, // ₹499 in paise
+    price: 199900, // ₹1,999 in paise
     currency: "INR",
-    twinsLimit: 10,
-    messagesLimit: -1, // -1 means unlimited
-    leadsLimit: 500,
+    twinsLimit: -1,
+    messagesLimit: 12000,
+    leadsLimit: -1,
+    isContactOnly: false,
     features: [
-      "10 digital twins",
-      "Unlimited chatbot messages",
-      "500 leads captured",
       "Priority email support",
+      "Lead export (CSV)",
       "Remove NetTwin branding",
+    ],
+  },
+  [SUBSCRIPTION_PLANS.ENTERPRISE]: {
+    name: "Enterprise",
+    slug: "enterprise",
+    price: 0, // contact sales — no Razorpay flow
+    currency: "INR",
+    twinsLimit: -1,
+    messagesLimit: -1, // unlimited once contracted
+    leadsLimit: -1,
+    isContactOnly: true,
+    features: [
+      "Dedicated success manager",
+      "Custom integrations",
+      "SLAs and uptime guarantees",
+      "On-prem / VPC deployment",
     ],
   },
 };

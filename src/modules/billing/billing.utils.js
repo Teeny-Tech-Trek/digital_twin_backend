@@ -81,6 +81,51 @@ export const isSubscriptionActive = (subscription) => {
   return true;
 };
 
+/** Length of a free-plan billing window in milliseconds (30 days). */
+export const FREE_PERIOD_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Ensure `user.subscription.currentPeriodStart` / `currentPeriodEnd` describe
+ * the user's CURRENT billing window. Mutates and saves the user document
+ * when a rollover happens, then returns the (possibly refreshed) user.
+ *
+ * Rules:
+ *   - Paid users: TTT's webhook sets both fields on activation; we only roll
+ *     over here when the window has ended AND no fresh webhook has arrived
+ *     (e.g. after subscription expiry). They fall back to a free-plan window.
+ *   - Free users: rolling 30-day window from signup, advanced lazily on the
+ *     first feature-gate check after the window ends. `limitNotifiedAt` is
+ *     cleared so the new period can re-notify on exhaustion.
+ *
+ * Pass a Mongoose document (not a `.lean()` plain object) so we can save.
+ * If a plain object is passed, this is a no-op (returns it unchanged) — the
+ * caller is expected to do its own counting against the existing window.
+ */
+export const ensureCurrentBillingPeriod = async (user) => {
+  if (!user || typeof user.save !== "function") return user;
+
+  const now = new Date();
+  const sub = user.subscription || {};
+  const start = sub.currentPeriodStart ? new Date(sub.currentPeriodStart) : null;
+  const end = sub.currentPeriodEnd ? new Date(sub.currentPeriodEnd) : null;
+
+  // Active paid window — nothing to roll over.
+  if (start && end && now < end) return user;
+
+  // Window missing or expired — open a fresh 30-day free window starting now.
+  // Anchor to user.createdAt for first-ever rollover so usage prior to any
+  // window setup (rare, only if Message rows pre-date this code) still counts.
+  const anchorStart = start && now >= end ? end : user.createdAt || now;
+  user.subscription = {
+    ...(user.subscription?.toObject?.() || user.subscription || {}),
+    currentPeriodStart: anchorStart,
+    currentPeriodEnd: new Date(anchorStart.getTime() + FREE_PERIOD_MS),
+    limitNotifiedAt: null,
+  };
+  await user.save();
+  return user;
+};
+
 /** Format paise → human-readable currency string. */
 export const formatPrice = (priceInPaise, currency = "INR") => {
   return new Intl.NumberFormat("en-IN", {

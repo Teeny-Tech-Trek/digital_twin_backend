@@ -186,9 +186,10 @@ const userSchema = new mongoose.Schema(
       name: { type: String, default: "Free" },
       price: { type: Number, default: 0 },
       currency: { type: String, default: "INR" },
-      twinsLimit: { type: Number, default: 1 },
-      messagesLimit: { type: Number, default: 50 },
-      leadsLimit: { type: Number, default: 10 },
+      // -1 means unlimited for any of the *Limit fields below.
+      twinsLimit: { type: Number, default: -1 },
+      messagesLimit: { type: Number, default: 200 },
+      leadsLimit: { type: Number, default: -1 },
       status: { type: String, default: "active" }, // "active" | "past_due"
     },
 
@@ -206,7 +207,15 @@ const userSchema = new mongoose.Schema(
           "payment_failed",
         ],
       },
+      // Start of the current 30-day usage window. Set on activation (paid)
+      // or lazily on first quota check (free). Counted messages are those
+      // with createdAt >= currentPeriodStart.
+      currentPeriodStart: { type: Date, default: null },
       currentPeriodEnd: { type: Date, default: null },
+      // When non-null, we've already sent the "limit reached" email to the
+      // user for the current period. Cleared on period rollover so the next
+      // exhaustion notifies again.
+      limitNotifiedAt: { type: Date, default: null },
       lastSyncedAt: { type: Date, default: null },
       planId: { type: String, default: null }, // TTT plan cuid
     },

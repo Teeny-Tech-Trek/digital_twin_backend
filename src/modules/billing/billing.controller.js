@@ -21,10 +21,15 @@ import {
 } from "./billing.constants.js";
 import {
   createBillingError,
+  ensureCurrentBillingPeriod,
   getDefaultFreePlan,
   getEffectivePlanLimits,
   isSubscriptionActive,
 } from "./billing.utils.js";
+import {
+  PAYMENTS_ENABLED,
+  paymentsDisabledResponse,
+} from "../../config/paymentToggle.js";
 
 const usagePercent = (used, limit) => {
   if (limit === -1) return 0; // unlimited
@@ -32,34 +37,57 @@ const usagePercent = (used, limit) => {
   return Math.min(100, Math.round((used / limit) * 100));
 };
 
+/** Render a local PLAN_LIMITS entry as the same shape getPlansFromCentral returns. */
+const renderLocalPlan = (slug) => {
+  const p = PLAN_LIMITS[slug];
+  if (!p) return null;
+  return {
+    id: `local-${slug}`,
+    slug: p.slug,
+    name: p.name,
+    price: p.price,
+    currency: p.currency,
+    durationDays: 30,
+    twinsLimit: p.twinsLimit,
+    messagesLimit: p.messagesLimit,
+    leadsLimit: p.leadsLimit,
+    features: p.features,
+    isPopular: false,
+    isContactOnly: !!p.isContactOnly,
+  };
+};
+
 /**
  * GET /api/billing/plans
- * Public list of available plans (also includes the local Free plan so the
- * UI can render Free alongside paid plans even when TTT doesn't store it).
+ * Returns the four NetTwin tiers in display order: Free, Starter, Pro,
+ * Enterprise. Starter + Pro come from TTT (source of truth for price);
+ * Free + Enterprise are rendered locally (no Razorpay flow for either).
  */
 export const getPlans = asyncHandler(async (_req, res) => {
   const centralPlans = await getPlansFromCentral();
+  const bySlug = new Map(centralPlans.map((p) => [p.slug, p]));
 
-  // Ensure Free always appears in the UI — it's NetTwin-owned, not in TTT.
-  const hasFree = centralPlans.some((p) => p.slug === SUBSCRIPTION_PLANS.FREE);
-  const free = PLAN_LIMITS[SUBSCRIPTION_PLANS.FREE];
-  const plans = hasFree
-    ? centralPlans
-    : [
-        {
-          id: "local-free",
-          slug: free.slug,
-          name: free.name,
-          price: free.price,
-          currency: free.currency,
-          twinsLimit: free.twinsLimit,
-          messagesLimit: free.messagesLimit,
-          leadsLimit: free.leadsLimit,
-          features: free.features,
-          isPopular: false,
-        },
-        ...centralPlans,
-      ];
+  const order = [
+    SUBSCRIPTION_PLANS.FREE,
+    SUBSCRIPTION_PLANS.STARTER,
+    SUBSCRIPTION_PLANS.PRO,
+    SUBSCRIPTION_PLANS.ENTERPRISE,
+  ];
+
+  const plans = order
+    .map((slug) => {
+      const central = bySlug.get(slug);
+      if (central) {
+        // Mark contact-only on central plans too (Enterprise won't usually be
+        // seeded centrally, but be defensive in case it is later).
+        return { ...central, isContactOnly: !!PLAN_LIMITS[slug]?.isContactOnly };
+      }
+      return renderLocalPlan(slug);
+    })
+    .filter(Boolean);
+
+  // Mark Pro as popular for UI emphasis.
+  for (const p of plans) p.isPopular = p.slug === SUBSCRIPTION_PLANS.PRO;
 
   res.json({ success: true, plans });
 });
@@ -67,25 +95,37 @@ export const getPlans = asyncHandler(async (_req, res) => {
 /**
  * GET /api/billing/status
  * Current plan, subscription, and usage counters for the authenticated user.
+ * Rolls the billing period over lazily so the counters always describe the
+ * current 30-day window.
  */
 export const getBillingStatus = asyncHandler(async (req, res) => {
-  const user = await User.findById(req.user._id).lean();
-  if (!user) {
+  const userDoc = await User.findById(req.user._id);
+  if (!userDoc) {
     return res.status(404).json({ success: false, message: "User not found" });
   }
+  // Mutate-and-save the period boundaries if we've rolled over.
+  await ensureCurrentBillingPeriod(userDoc);
+  const user = userDoc.toObject();
 
   const effectivePlan = getEffectivePlanLimits(user);
+  const periodStart = user.subscription?.currentPeriodStart || null;
 
   // Lead and Message reference twinId, not user — resolve the user's twin ids
-  // first so usage counts are accurate.
+  // first so usage counts are accurate. Messages are counted as user-role
+  // turns within the current period to match the metering on the chat gate.
   const twinIds = await DigitalTwin.find({ user: user._id }).distinct("_id");
+  const baseFilter = twinIds.length ? { twinId: { $in: twinIds } } : null;
+  const periodFilter = periodStart ? { createdAt: { $gte: periodStart } } : {};
+
   const [twinCount, leadCount, messageCount] = await Promise.all([
     Promise.resolve(twinIds.length),
-    twinIds.length
-      ? Lead.countDocuments({ twinId: { $in: twinIds } }).catch(() => 0)
+    baseFilter
+      ? Lead.countDocuments({ ...baseFilter, ...periodFilter }).catch(() => 0)
       : 0,
-    twinIds.length
-      ? Message.countDocuments({ twinId: { $in: twinIds } }).catch(() => 0)
+    baseFilter
+      ? Message.countDocuments({ ...baseFilter, role: "user", ...periodFilter }).catch(
+          () => 0
+        )
       : 0,
   ]);
 
@@ -117,10 +157,12 @@ export const getBillingStatus = asyncHandler(async (req, res) => {
       twinsLimit: effectivePlan.twinsLimit,
       messagesLimit: effectivePlan.messagesLimit,
       leadsLimit: effectivePlan.leadsLimit,
+      isContactOnly: !!effectivePlan.isContactOnly,
     },
     subscription: {
       status: user.subscription?.status || "inactive",
       isActive: isSubscriptionActive(user.subscription),
+      currentPeriodStart: user.subscription?.currentPeriodStart || null,
       currentPeriodEnd: user.subscription?.currentPeriodEnd || null,
       centralCustomerId: user.subscription?.centralBillingCustomerId || null,
       lastSyncedAt: user.subscription?.lastSyncedAt || null,
@@ -204,6 +246,15 @@ export const createOrder = asyncHandler(async (req, res) => {
       "planId is required",
       400
     );
+  }
+
+  // Global payments kill-switch. Flipped via PAYMENTS_ENABLED env var; see
+  // src/config/paymentToggle.js. The frontend has a mirror toggle for UX
+  // (renders a "Contact us" modal), but THIS check is the security boundary
+  // — even if a stale/tampered client tries to call us, the order is never
+  // created.
+  if (!PAYMENTS_ENABLED) {
+    return res.status(503).json(paymentsDisabledResponse(planId));
   }
 
   const user = await User.findById(req.user._id);
