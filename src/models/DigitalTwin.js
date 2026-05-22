@@ -84,6 +84,15 @@ const digitalTwinSchema = new mongoose.Schema(
     links: linksSchema,
     isActive: { type: Boolean, default: true },
     lastUpdated: { type: Date, default: Date.now },
+    // Timestamp of the "your AI twin is ready" email. Used as an
+    // idempotency key by the ingestion-status poll so we never email the
+    // user twice when the SourcesPanel polls every 4 seconds.
+    //
+    // null  -> never sent (default for both new twins and pre-existing
+    //          docs created before this field existed — Mongoose treats
+    //          missing as undefined which falsy-checks the same).
+    // Date  -> emailed at this moment, do not resend until manually reset.
+    aiReadyEmailSentAt: { type: Date, default: null },
   },
   { timestamps: true }
 );

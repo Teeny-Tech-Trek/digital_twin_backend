@@ -1,21 +1,67 @@
 // backend/services/chatService.js
 //
-// Generates a chat reply from the user's digital twin profile. The model
-// answers AS the twin, grounded ONLY in the data the twin owner provided.
+// Generates a chat reply for the public twin chatbot.
 //
-// IMPORTANT: do NOT invent business experience, company names, year-counts,
-// or accomplishments in the system prompt. The model will echo anything we
-// put there as if it were the twin's lived experience — the previous version
-// hardcoded "20+ years" and "TechCorp" and the model fabricated those into
-// real replies.
+// PRIMARY PATH: the AI backend (portfolio-chatbot-backend) runs the
+// hybrid-RAG pipeline — vector retrieval over the twin's resume + website
+// + structured profile, plus Neo4j knowledge graph, plus a deterministic
+// profile slot-filler for fact questions (name/phone/email/...). The AI
+// backend owns prompting; we just forward the query and get an answer.
+//
+// FALLBACK PATH: if the AI backend is unreachable, we degrade to the
+// old OpenAI-direct call so the chatbot doesn't go fully dark during an
+// AI-backend deploy or outage. The fallback uses ONLY the Mongo twin
+// document (no retrieval over resume/website) so it's strictly less
+// capable but still answers grounded in the structured profile.
 
 import OpenAI from "openai";
 import DigitalTwin from "../models/DigitalTwin.js";
 import Message from "../models/Message.js";
+import aiEngine from "./aiEngineClient.js";
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = process.env.OPENAI_API_KEY
+  ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+  : null;
 
-/** Format a value, returning a placeholder when empty so the prompt stays grounded. */
+const persistTurn = async (twinId, userMessage, assistantReply) => {
+  if (userMessage?.role && userMessage?.content) {
+    try {
+      await Message.create([
+        { twinId, role: userMessage.role, content: userMessage.content },
+        { twinId, role: "assistant", content: assistantReply },
+      ]);
+    } catch (err) {
+      console.warn(`[chat] message persist failed for twin=${twinId}:`, err.message);
+    }
+  }
+};
+
+// ----------------------------------------------------------------------
+// Primary path: AI backend hybrid RAG.
+// ----------------------------------------------------------------------
+const replyViaAiEngine = async ({ twinId, messages, userEmail }) => {
+  const sessionId =
+    messages.find((m) => m.sessionId)?.sessionId ||
+    `twin-${twinId}-${userEmail || "anon"}`;
+  const result = await aiEngine.chat({
+    twinId,
+    messages,
+    sessionId,
+    userId: userEmail || "anonymous",
+    userEmail,
+  });
+  if (!result.ok) {
+    return null; // signal caller to try fallback
+  }
+  return result.reply;
+};
+
+// ----------------------------------------------------------------------
+// Fallback path: OpenAI directly with the Mongo profile.
+// Same prompt as the legacy implementation — kept intentionally close so
+// the fallback behaviour matches what users saw before AI-backend
+// integration shipped.
+// ----------------------------------------------------------------------
 const fmt = (value, fallback = "(not provided)") => {
   if (value === null || value === undefined) return fallback;
   if (typeof value === "string") return value.trim() || fallback;
@@ -60,9 +106,6 @@ const buildSystemPrompt = (twin) => {
   const story = twin.story || {};
   const networking = twin.networking || {};
 
-  // Notice every block reads ONLY from the twin document. No hardcoded
-  // experiences, durations, or example companies — those would leak into
-  // the model's output as if they were the twin's actual history.
   return `You are the digital twin of ${fmt(identity.name, "this professional")}.
 You answer as them, in first person, grounded ONLY in the profile below. Do not invent companies, roles, years of experience, projects, or credentials that aren't listed. If asked about something not in the profile, say you don't have that information handy and offer to follow up.
 
@@ -112,6 +155,36 @@ Boundaries: ${fmt(networking.boundaries)}
 - End with a short question that moves the conversation forward when natural — not on every message.`;
 };
 
+const replyViaOpenAiFallback = async (twin, messages) => {
+  if (!openai) {
+    const err = new Error("Chat service temporarily unavailable");
+    err.statusCode = 503;
+    throw err;
+  }
+  const systemPrompt = buildSystemPrompt(twin);
+  const formattedMessages = [
+    { role: "system", content: systemPrompt },
+    ...messages,
+  ];
+
+  const tone = (twin.personality?.tone || "").toLowerCase();
+  const temperature =
+    /creative|playful|energetic/.test(tone) ? 0.8 :
+    /analytical|precise|formal/.test(tone) ? 0.4 : 0.6;
+
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: formattedMessages,
+    temperature,
+    max_tokens: 350,
+  });
+
+  return response.choices?.[0]?.message?.content || "";
+};
+
+// ----------------------------------------------------------------------
+// Public entrypoint
+// ----------------------------------------------------------------------
 export const chatWithDigitalTwin = async (twinId, messages, userEmail) => {
   const twin = await DigitalTwin.findById(twinId);
   if (!twin) {
@@ -125,45 +198,29 @@ export const chatWithDigitalTwin = async (twinId, messages, userEmail) => {
     throw error;
   }
 
-  const systemPrompt = buildSystemPrompt(twin);
-
-  const formattedMessages = [
-    { role: "system", content: systemPrompt },
-    ...messages,
-  ];
-
-  // Tone heuristic: creative tones run hotter, analytical run cooler.
-  const tone = (twin.personality?.tone || "").toLowerCase();
-  const temperature =
-    /creative|playful|energetic/.test(tone) ? 0.8 :
-    /analytical|precise|formal/.test(tone) ? 0.4 : 0.6;
-
+  let aiReply = null;
   try {
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: formattedMessages,
-      temperature,
-      max_tokens: 350,
-    });
-
-    const aiReply = response.choices?.[0]?.message?.content || "";
-
-    // Persist both turns for analytics + future history rehydration.
-    const userMsg = messages[messages.length - 1];
-    if (userMsg?.role && userMsg?.content) {
-      await Message.create([
-        { twinId, role: userMsg.role, content: userMsg.content },
-        { twinId, role: "assistant", content: aiReply },
-      ]);
-    }
-
-    return aiReply;
-  } catch (error) {
-    console.error("[CHAT] OpenAI API error:", error?.message || error);
-    // Bubble up so the caller returns a real 5xx; don't mask with a fake
-    // success that the user would mistake for a real twin reply.
-    const wrapped = new Error("Chat service temporarily unavailable");
-    wrapped.statusCode = 503;
-    throw wrapped;
+    aiReply = await replyViaAiEngine({ twinId, messages, userEmail });
+  } catch (err) {
+    console.warn(`[chat] AI engine threw, falling back to OpenAI:`, err.message);
   }
+
+  if (!aiReply) {
+    // Either AI engine returned ok=false, or threw, or returned an empty
+    // string. Try the OpenAI fallback so the visitor still gets an
+    // answer — strictly less capable (no resume/website retrieval) but
+    // better than a 503.
+    try {
+      aiReply = await replyViaOpenAiFallback(twin, messages);
+    } catch (err) {
+      console.error("[chat] both AI engine and OpenAI fallback failed:", err?.message || err);
+      const wrapped = new Error("Chat service temporarily unavailable");
+      wrapped.statusCode = 503;
+      throw wrapped;
+    }
+  }
+
+  const userMsg = messages[messages.length - 1];
+  await persistTurn(twinId, userMsg, aiReply);
+  return aiReply;
 };

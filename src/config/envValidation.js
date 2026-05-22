@@ -54,6 +54,20 @@ const validateEnv = () => {
     process.exit(1);
   }
 
+  // AI engine integration. These are warned-but-not-required so local dev
+  // without the AI backend running still boots (chatService falls back to
+  // the OpenAI-direct path). In production both should be set.
+  if (!process.env.AI_BACKEND_URL) {
+    console.warn(
+      '⚠️  AI_BACKEND_URL is not set. Twin chat will fall back to direct OpenAI calls (no resume/website retrieval).'
+    );
+  }
+  if (process.env.AI_BACKEND_URL && !process.env.AI_BACKEND_INTERNAL_TOKEN) {
+    console.warn(
+      '⚠️  AI_BACKEND_URL is set but AI_BACKEND_INTERNAL_TOKEN is missing — ingestion calls (resume/website/profile sync) will be rejected by the AI backend in production.'
+    );
+  }
+
   console.log('✅ Environment validation passed');
   return true;
 };

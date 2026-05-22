@@ -1,4 +1,5 @@
 import express from "express";
+import multer from "multer";
 import { protect } from "../middleware/authMiddleware.js";
 import {
   getDigitalTwin,
@@ -7,6 +8,13 @@ import {
   deleteTwin,
   getPublicTwin,
 } from "../controllers/digitalTwinController.js";
+import {
+  ingestResume,
+  ingestWebsite,
+  ingestionStatus,
+  jobStatus,
+  resyncProfile,
+} from "../controllers/digitalTwinIngestController.js";
 
 const router = express.Router();
 
@@ -24,5 +32,28 @@ router.post("/create", protect, createUpdateDigitalTwin);
 router.patch("/section", protect, patchSection);
 router.delete("/delete", protect, deleteTwin);
 router.get("/public/:twinId", getPublicTwin);
+
+// -----------------------------------------------------------------------------
+// AI-backend ingestion proxies
+// -----------------------------------------------------------------------------
+// File uploads use multer with memoryStorage so we can forward the Buffer
+// straight to the AI backend. Capped at 15 MB to match the AI backend's
+// internal limit — bounce oversized uploads here so they never traverse
+// the proxy.
+const resumeUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024 },
+});
+
+router.post(
+  "/ingest/resume",
+  protect,
+  resumeUpload.single("file"),
+  ingestResume
+);
+router.post("/ingest/website", protect, ingestWebsite);
+router.get("/ingestion-status", protect, ingestionStatus);
+router.get("/jobs/:jobId", protect, jobStatus);
+router.post("/resync", protect, resyncProfile);
 
 export default router;
