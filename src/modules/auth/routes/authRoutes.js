@@ -1,5 +1,11 @@
 import express from 'express';
 import * as authController from '../controllers/authController.js';
+import {
+  upload as profilePictureUpload,
+  updateProfilePicture,
+  removeProfilePicture,
+  handleUploadError,
+} from '../controllers/profilePictureController.js';
 import * as authMiddleware from '../middleware/authMiddleware.js';
 import {
   validateRequest,
@@ -104,6 +110,24 @@ router.put(
   authMiddleware.protect,
   validateRequest(updateProfileSchema),
   authController.updateProfile
+);
+
+// Profile picture upload (multipart/form-data, field: profilePicture).
+// The trailing `handleUploadError` translates multer rejections (size limit,
+// MIME mismatch) into proper 4xx responses rather than bubbling them into
+// the generic 500 handler.
+router.put(
+  '/profile/picture',
+  authMiddleware.protect,
+  profilePictureUpload.single('profilePicture'),
+  handleUploadError,
+  updateProfilePicture
+);
+
+router.delete(
+  '/profile/picture',
+  authMiddleware.protect,
+  removeProfilePicture
 );
 
 // Change password

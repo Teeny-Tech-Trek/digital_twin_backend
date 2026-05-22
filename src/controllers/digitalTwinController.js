@@ -10,14 +10,22 @@ import {
 
 /**
  * GET /api/digital-twin/get
- * Return the user's single twin, or 404 if none exists yet.
+ *
+ * Returns the authenticated user's single twin, or `data: null` when the
+ * user hasn't created one yet. We used to return 404 for the empty state,
+ * but that surfaced as a red "404 (Not Found)" in DevTools for every
+ * first-time visitor to the dashboard — a noise signal that masked real
+ * errors during incident triage. The empty case isn't a missing resource,
+ * it's a known "no twin yet" state that the dashboard renders as the
+ * onboarding CTA — so 200 with null is the correct semantic.
+ *
+ * Frontend (DigitalTwinContext.loadDigitalTwin) already calls
+ * setDigitalTwin(result.data) directly, so a null `data` just lands in
+ * state as null without any extra branching needed.
  */
 export const getDigitalTwin = asyncHandler(async (req, res) => {
   const twin = await getDigitalTwinByUser(req.user._id);
-  if (!twin) {
-    return res.status(404).json({ success: false, message: "Digital twin not found" });
-  }
-  res.json({ success: true, data: twin });
+  res.json({ success: true, data: twin || null });
 });
 
 /**
