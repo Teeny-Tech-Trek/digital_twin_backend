@@ -1,5 +1,6 @@
 import DigitalTwin from "../models/DigitalTwin.js";
 import aiEngine from "./aiEngineClient.js";
+import { sanitizeDigitalTwinPayload } from "../utils/digitalTwinPayload.js";
 
 /**
  * Single-twin-per-user service layer.
@@ -111,13 +112,14 @@ export const ensureDraftDigitalTwin = async (userId, seed = {}) => {
  * a failed AI sync is logged but does not block the response.
  */
 export const createOrUpdateDigitalTwin = async (userId, data) => {
+  const sanitizedData = sanitizeDigitalTwinPayload(data);
   let digitalTwin = await DigitalTwin.findOne({ user: userId });
 
   if (digitalTwin) {
-    Object.assign(digitalTwin, data);
+    Object.assign(digitalTwin, sanitizedData);
     digitalTwin.lastUpdated = new Date();
   } else {
-    digitalTwin = new DigitalTwin({ user: userId, ...data });
+    digitalTwin = new DigitalTwin({ user: userId, ...sanitizedData });
   }
 
   await digitalTwin.save();
@@ -157,7 +159,8 @@ export const updateSection = async (userId, section, sectionData) => {
     throw err;
   }
 
-  digitalTwin[section] = sectionData;
+  const sanitizedSection = sanitizeDigitalTwinPayload({ [section]: sectionData })[section];
+  digitalTwin[section] = sanitizedSection;
   digitalTwin.lastUpdated = new Date();
   await digitalTwin.save();
 
