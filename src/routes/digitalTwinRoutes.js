@@ -1,5 +1,6 @@
 import express from "express";
 import multer from "multer";
+import rateLimit from "express-rate-limit";
 import { protect } from "../middleware/authMiddleware.js";
 import {
   getDigitalTwin,
@@ -14,9 +15,22 @@ import {
   ingestionStatus,
   jobStatus,
   resyncProfile,
+  extractedProfile,
+  ingestComplete,
 } from "../controllers/digitalTwinIngestController.js";
 
 const router = express.Router();
+const ingestionPollLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 1000,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    error: "RATE_LIMITED",
+    message: "Too many ingestion polling requests. Please slow down and try again.",
+  },
+});
 
 // Single-twin-per-user model. There used to be a /list endpoint for
 // multi-twin support and a canCreateTwin quota middleware on /create —
@@ -52,8 +66,11 @@ router.post(
   ingestResume
 );
 router.post("/ingest/website", protect, ingestWebsite);
-router.get("/ingestion-status", protect, ingestionStatus);
-router.get("/jobs/:jobId", protect, jobStatus);
+router.get("/ingestion-status", protect, ingestionPollLimiter, ingestionStatus);
+router.get("/jobs/:jobId", protect, ingestionPollLimiter, jobStatus);
+router.get("/extracted-profile", protect, extractedProfile);
 router.post("/resync", protect, resyncProfile);
+router.post("/internal/ingest-complete", ingestComplete);
+router.post("/internal/ingestion-complete", ingestComplete);
 
 export default router;

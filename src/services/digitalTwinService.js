@@ -28,6 +28,81 @@ export const getDigitalTwinByUser = async (userId) => {
 };
 
 /**
+ * Ensure the caller has a placeholder twin record that can anchor upload-first
+ * onboarding. This draft exists only so we have a stable Mongo `_id` to map to
+ * the AI backend's tenant id before the user finishes the wizard.
+ *
+ * Important: unlike the normal create/update path, draft creation does NOT
+ * sync to the AI engine. Upload-first onboarding should bootstrap the tenant
+ * and extracted profile from the sources themselves, not from placeholder text.
+ */
+export const ensureDraftDigitalTwin = async (userId, seed = {}) => {
+  let digitalTwin = await DigitalTwin.findOne({ user: userId });
+
+  if (digitalTwin) {
+    let touched = false;
+    if (seed.website && !digitalTwin.links?.website) {
+      digitalTwin.links = { ...(digitalTwin.links?.toObject?.() || digitalTwin.links || {}), website: seed.website };
+      touched = true;
+    }
+    if (seed.portfolio && !digitalTwin.links?.portfolio) {
+      digitalTwin.links = { ...(digitalTwin.links?.toObject?.() || digitalTwin.links || {}), portfolio: seed.portfolio };
+      touched = true;
+    }
+    if (touched) {
+      digitalTwin.lastUpdated = new Date();
+      await digitalTwin.save();
+    }
+    return digitalTwin;
+  }
+
+  digitalTwin = new DigitalTwin({
+    user: userId,
+    identity: {
+      name: "Draft Twin",
+      role: "Draft",
+      tagline: "",
+      bio: "This twin is being created from uploaded sources. Review and complete the form before publishing.",
+    },
+    businesses: [],
+    experience: [],
+    education: [],
+    skills: {
+      list: [],
+      coreDomains: "",
+      signatureStrengths: "",
+    },
+    personality: {
+      traits: [],
+      leadership_style: "",
+      decision_style: "",
+      tone: "",
+      archetype: "",
+      values: [],
+    },
+    story: {
+      mission: "",
+      impact: "",
+      themes: [],
+    },
+    networking: {
+      audience: "",
+      intent: "",
+      boundaries: [],
+    },
+    links: {
+      linkedin: "",
+      website: seed.website || "",
+      portfolio: seed.portfolio || "",
+      socials: [],
+    },
+  });
+
+  await digitalTwin.save();
+  return digitalTwin;
+};
+
+/**
  * Create or update the user's single twin.
  * Returns the persisted document (with server-assigned _id, timestamps).
  *

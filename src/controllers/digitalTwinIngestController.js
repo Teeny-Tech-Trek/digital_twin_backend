@@ -8,6 +8,9 @@ import asyncHandler from "../middleware/asyncHandler.js";
 import DigitalTwin from "../models/DigitalTwin.js";
 import aiEngine from "../services/aiEngineClient.js";
 import { maybeSendTwinReadyEmail } from "../services/twinNotificationService.js";
+import { ensureDraftDigitalTwin } from "../services/digitalTwinService.js";
+
+const INTERNAL_TOKEN_HEADER = "x-internal-token";
 
 /** Resolve the caller's twin (creates one would be a wizard concern, not here). */
 const resolveCallerTwin = async (req) => {
@@ -17,6 +20,43 @@ const resolveCallerTwin = async (req) => {
       "You must create your digital twin first before uploading sources."
     );
     err.statusCode = 404;
+    throw err;
+  }
+  return twin;
+};
+
+const extractInternalToken = (req) =>
+  req.headers[INTERNAL_TOKEN_HEADER] ||
+  (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+
+const requireInternalToken = (req) => {
+  const expected = (process.env.AI_BACKEND_INTERNAL_TOKEN || "").trim();
+  const actual = String(extractInternalToken(req) || "").trim();
+  return Boolean(expected) && actual === expected;
+};
+
+const tenantIdToTwinId = (tenantId = "") => {
+  const normalized = String(tenantId).trim();
+  if (!/^twin-[a-f0-9]{24}$/i.test(normalized)) return null;
+  return normalized.replace(/^twin-/i, "");
+};
+
+/**
+ * Upload-first onboarding needs a tenant anchor before the user has completed
+ * the full wizard. We create a local draft twin lazily and ensure the AI
+ * backend tenant exists, but we deliberately do NOT push placeholder profile
+ * text to the AI index.
+ */
+const resolveOrCreateCallerTwin = async (req, seed = {}) => {
+  const twin = await ensureDraftDigitalTwin(req.user._id, seed);
+  const ensureResult = await aiEngine.ensureTenant({
+    twinId: twin._id,
+    displayName: twin.identity?.name || "",
+    owner: req.user._id?.toString?.() || "",
+  });
+  if (!ensureResult.ok) {
+    const err = new Error(ensureResult.error?.message || "Could not initialize AI tenant.");
+    err.statusCode = 502;
     throw err;
   }
   return twin;
@@ -35,7 +75,7 @@ export const ingestResume = asyncHandler(async (req, res) => {
       .status(400)
       .json({ success: false, error: "VALIDATION_ERROR", message: "Missing `file` field." });
   }
-  const twin = await resolveCallerTwin(req);
+  const twin = await resolveOrCreateCallerTwin(req);
   const result = await aiEngine.ingestResume({
     twinId: twin._id,
     fileBuffer: req.file.buffer,
@@ -65,9 +105,13 @@ export const ingestResume = asyncHandler(async (req, res) => {
  * can also call this without `url` and we'll fall back to the twin doc.
  */
 export const ingestWebsite = asyncHandler(async (req, res) => {
-  const twin = await resolveCallerTwin(req);
   const explicitUrl = (req.body?.url || "").trim();
-  const fallbackUrl = (twin.links?.website || twin.links?.portfolio || "").trim();
+  const existingTwin = await DigitalTwin.findOne({ user: req.user._id });
+  const fallbackUrl = (
+    existingTwin?.links?.website ||
+    existingTwin?.links?.portfolio ||
+    ""
+  ).trim();
   const rawUrl = explicitUrl || fallbackUrl;
   if (!rawUrl) {
     return res.status(400).json({
@@ -108,6 +152,8 @@ export const ingestWebsite = asyncHandler(async (req, res) => {
       message: `Could not parse "${rawUrl}" as a URL.`,
     });
   }
+
+  const twin = await resolveOrCreateCallerTwin(req, { website: url });
 
   const result = await aiEngine.ingestWebsite({
     twinId: twin._id,
@@ -195,6 +241,105 @@ export const jobStatus = asyncHandler(async (req, res) => {
     });
   }
   res.json({ success: true, data: result.data });
+});
+
+/**
+ * POST /api/digital-twin/internal/ingest-complete
+ * POST /api/digital-twin/internal/ingestion-complete
+ *
+ * Internal webhook called by the AI backend when a tenant flips to ready.
+ * We verify the shared token, confirm the tenant really is ready, and then
+ * trigger the idempotent "your twin is ready" email path server-side.
+ */
+export const ingestComplete = asyncHandler(async (req, res) => {
+  if (!requireInternalToken(req)) {
+    return res.status(401).json({
+      success: false,
+      error: "UNAUTHORIZED",
+      message: "Invalid internal token",
+    });
+  }
+
+  const tenantId = String(req.body?.tenant_id || "").trim();
+  const twinId = tenantIdToTwinId(tenantId);
+  if (!tenantId || !twinId) {
+    return res.status(400).json({
+      success: false,
+      error: "VALIDATION_ERROR",
+      message: "tenant_id must look like twin-<mongoid>.",
+    });
+  }
+
+  const twin = await DigitalTwin.findById(twinId).populate("user");
+  if (!twin) {
+    return res.status(404).json({
+      success: false,
+      error: "TWIN_NOT_FOUND",
+      message: `No digital twin found for tenant ${tenantId}`,
+    });
+  }
+
+  const statusResult = await aiEngine.getTenantStatus({ twinId: twin._id });
+  if (!statusResult.ok) {
+    return res.status(statusResult.error?.status || 502).json({
+      success: false,
+      error: "AI_ENGINE_UNAVAILABLE",
+      message: statusResult.error?.message || "Could not reach AI engine.",
+      detail: statusResult.error?.body || null,
+    });
+  }
+
+  const aiStatus = statusResult.data || {};
+  if (aiStatus.overall_status !== "ready") {
+    return res.status(409).json({
+      success: false,
+      error: "TENANT_NOT_READY",
+      message: `Tenant ${tenantId} is not ready yet.`,
+      data: aiStatus,
+    });
+  }
+
+  let notify;
+  try {
+    notify = await maybeSendTwinReadyEmail({ twin, aiStatus });
+  } catch (err) {
+    console.warn(`[ingestComplete] twin-ready notifier threw: ${err.message}`);
+    return res.status(500).json({
+      success: false,
+      error: "NOTIFIER_ERROR",
+      message: err.message || "Ready notifier failed.",
+    });
+  }
+
+  return res.json({
+    success: true,
+    message: "Ingestion completion acknowledged",
+    tenantId,
+    emailed: Boolean(notify?.emailed),
+    notice: notify?.reason || null,
+    data: aiStatus,
+  });
+});
+
+/**
+ * GET /api/digital-twin/extracted-profile
+ * Return the AI backend's extracted structured profile for the caller's twin.
+ * Used by the wizard's upload-first onboarding autofill step.
+ */
+export const extractedProfile = asyncHandler(async (req, res) => {
+  const twin = await resolveCallerTwin(req);
+  const result = await aiEngine.getTenantProfile({ twinId: twin._id });
+  if (!result.ok) {
+    return res.status(result.error?.status || 502).json({
+      success: false,
+      error: "AI_ENGINE_UNAVAILABLE",
+      message: result.error?.message || "Could not reach AI engine.",
+    });
+  }
+  res.json({
+    success: true,
+    data: result.data,
+  });
 });
 
 /**

@@ -66,18 +66,26 @@ export const twinDocToProfile = (twin) => {
   };
 
   const skills = Array.isArray(t.skills?.list) ? t.skills.list.filter(Boolean) : [];
-  const skillsExtra = {
-    core_domains: t.skills?.coreDomains || "",
-    signature_strengths: t.skills?.signatureStrengths || "",
+  const skillsDetail = {
+    coreDomains: t.skills?.coreDomains || "",
+    signatureStrengths: t.skills?.signatureStrengths || "",
   };
 
   return {
     identity,
     bio: identity.bio,
-    story: t.story?.mission || "",
+    story: {
+      mission: t.story?.mission || "",
+      impact: t.story?.impact || "",
+      themes: t.story?.themes || [],
+    },
     mission: t.story?.mission || "",
-    skills,
-    skills_detail: skillsExtra,
+    skills: {
+      list: skills,
+      coreDomains: skillsDetail.coreDomains,
+      signatureStrengths: skillsDetail.signatureStrengths,
+    },
+    skills_detail: skillsDetail,
     businesses: (t.businesses || []).map((b) => ({
       name: b.name,
       title: b.name,
@@ -222,6 +230,19 @@ export const getTenantStatus = async ({ twinId }) => {
   }
 };
 
+export const getTenantProfile = async ({ twinId }) => {
+  const tenantId = twinIdToTenantId(twinId);
+  try {
+    const res = await axios.get(
+      `${baseURL()}/v1/tenants/${tenantId}/profile`,
+      { headers: internalHeaders(), timeout: TIMEOUT_MS }
+    );
+    return { ok: true, tenantId, data: res.data };
+  } catch (error) {
+    return _wrapError(error, "getTenantProfile", tenantId);
+  }
+};
+
 export const getJob = async ({ jobId }) => {
   try {
     const res = await axios.get(
@@ -346,6 +367,7 @@ export default {
   ingestResume,
   ingestWebsite,
   getTenantStatus,
+  getTenantProfile,
   getJob,
   deleteTenant,
   chat,

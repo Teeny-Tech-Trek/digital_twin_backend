@@ -61,7 +61,12 @@ app.use(cookieParser());
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 100, // limit each IP to 100 requests per windowMs
-  message: 'Too many requests from this IP, please try again later.'
+  message: 'Too many requests from this IP, please try again later.',
+  skip: (req) =>
+    req.path.startsWith("/api/digital-twin/jobs/") ||
+    req.path === "/api/digital-twin/ingestion-status" ||
+    req.path === "/api/digital-twin/internal/ingest-complete" ||
+    req.path === "/api/digital-twin/internal/ingestion-complete",
 });
 
 // Auth endpoints rate limiter (stricter)
