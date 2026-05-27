@@ -6,13 +6,18 @@ import DigitalTwin from "../../models/DigitalTwin.js";
 import Lead from "../../models/Lead.js";
 import Message from "../../models/Message.js";
 import User from "../../models/User.js";
-import { getEffectivePlanLimits, isSubscriptionActive } from "./billing.utils.js";
+import emailService from "../auth/services/emailService.js";
+import {
+  ensureCurrentBillingPeriod,
+  getEffectivePlanLimits,
+  isSubscriptionActive,
+} from "./billing.utils.js";
 
-/** Resolve a fresh User (with subscription/plan fields) once per request. */
-const resolveUser = async (req) => {
-  if (req._billingUser) return req._billingUser;
-  const user = await User.findById(req.user._id).lean();
-  req._billingUser = user;
+/** Resolve a fresh User document (with subscription/plan fields). */
+const resolveUserDoc = async (req) => {
+  if (req._billingUserDoc) return req._billingUserDoc;
+  const user = await User.findById(req.user._id);
+  req._billingUserDoc = user;
   return user;
 };
 
@@ -20,7 +25,10 @@ const quotaError = (res, { feature, used, limit }) =>
   res.status(429).json({
     success: false,
     error: "QUOTA_EXCEEDED",
-    message: `${feature} limit reached (${limit}). Upgrade your plan to continue.`,
+    message:
+      feature === "Chat message"
+        ? "This digital twin is currently not available. The owner has reached their monthly chat-message limit."
+        : `${feature} limit reached (${limit}). Upgrade your plan to continue.`,
     current: used,
     limit,
     redirectTo: "/billing",
@@ -32,42 +40,73 @@ const quotaError = (res, { feature, used, limit }) =>
 // support is ever reintroduced, restore the middleware from git history.
 
 /**
- * Resolve the twin-owner user from a request. Public chatbot/lead routes
- * don't have req.user — we look up the owner via req.body.twinId or
- * req.params.twinId so visitor traffic is still metered against the right
- * account's quota.
+ * Resolve the twin-owner user (as a Mongoose document, so the period helper
+ * can mutate-and-save). Public chatbot/lead routes don't have req.user — we
+ * look up the owner via req.body.twinId or req.params.twinId so visitor
+ * traffic still meters against the right account.
  */
-const resolveTwinOwner = async (req) => {
-  if (req.user) return resolveUser(req);
+const resolveTwinOwnerDoc = async (req) => {
+  if (req.user) return resolveUserDoc(req);
   const twinId = req.body?.twinId || req.params?.twinId;
   if (!twinId) return null;
   const twin = await DigitalTwin.findById(twinId).select("user").lean();
   if (!twin) return null;
-  return User.findById(twin.user).lean();
+  return User.findById(twin.user);
 };
 
-/** Count Leads/Messages tied to any twin owned by `user`. */
-const countByTwinOwner = async (Model, user) => {
+/** Count messages or leads tied to any twin owned by `user` within [since, now]. */
+const countByTwinOwner = async (Model, user, since, extraFilter = {}) => {
   const twinIds = await DigitalTwin.find({ user: user._id }).distinct("_id");
   if (!twinIds.length) return 0;
-  return Model.countDocuments({ twinId: { $in: twinIds } });
+  const filter = { twinId: { $in: twinIds }, ...extraFilter };
+  if (since) filter.createdAt = { $gte: since };
+  return Model.countDocuments(filter);
 };
 
 /**
- * Block chatbot messaging when the twin owner is at their plan's messagesLimit.
- * Applied to the public chatbot route — visitor traffic counts against the
- * owner's quota.
+ * Block chatbot messaging when the twin owner has hit their per-period
+ * messagesLimit. Public route — quota is metered against the owner via
+ * req.body.twinId. On first exhaustion in a period, also fires off a
+ * "limit reached" email to the owner (fire-and-forget — never blocks the
+ * HTTP response).
  */
 export const canSendChatMessage = async (req, res, next) => {
   try {
-    const user = await resolveTwinOwner(req);
-    if (!user) return next(); // can't resolve owner — don't block
+    const userDoc = await resolveTwinOwnerDoc(req);
+    if (!userDoc) return next(); // can't resolve owner — don't block
 
+    const user = await ensureCurrentBillingPeriod(userDoc);
     const plan = getEffectivePlanLimits(user);
     const limit = plan.messagesLimit;
     if (limit === -1) return next();
-    const used = await countByTwinOwner(Message, user).catch(() => 0);
-    if (used >= limit) return quotaError(res, { feature: "Chat message", used, limit });
+
+    const periodStart = user.subscription?.currentPeriodStart || null;
+    // Count only visitor (user-role) messages — assistant replies are output,
+    // not billable input. Matches the UX of "200 messages" being 200 turns.
+    const used = await countByTwinOwner(Message, user, periodStart, { role: "user" }).catch(
+      () => 0
+    );
+
+    if (used >= limit) {
+      // One email per period — fire-and-forget so chat path stays fast.
+      if (!user.subscription?.limitNotifiedAt) {
+        user.subscription.limitNotifiedAt = new Date();
+        user.save().catch((err) =>
+          console.warn("[BILLING] Could not persist limitNotifiedAt:", err.message)
+        );
+        emailService
+          .sendLimitReachedEmail(user, {
+            used,
+            limit,
+            planName: plan.name,
+            periodEnd: user.subscription?.currentPeriodEnd,
+          })
+          .catch((err) =>
+            console.warn("[BILLING] sendLimitReachedEmail failed:", err.message)
+          );
+      }
+      return quotaError(res, { feature: "Chat message", used, limit });
+    }
     return next();
   } catch (error) {
     console.error("[BILLING] canSendChatMessage error:", error);
@@ -78,12 +117,14 @@ export const canSendChatMessage = async (req, res, next) => {
 /** Block lead capture when the twin owner is at their plan's leadsLimit. */
 export const canCreateLead = async (req, res, next) => {
   try {
-    const user = await resolveTwinOwner(req);
-    if (!user) return next();
+    const userDoc = await resolveTwinOwnerDoc(req);
+    if (!userDoc) return next();
+    const user = await ensureCurrentBillingPeriod(userDoc);
     const plan = getEffectivePlanLimits(user);
     const limit = plan.leadsLimit;
     if (limit === -1) return next();
-    const used = await countByTwinOwner(Lead, user).catch(() => 0);
+    const periodStart = user.subscription?.currentPeriodStart || null;
+    const used = await countByTwinOwner(Lead, user, periodStart).catch(() => 0);
     if (used >= limit) return quotaError(res, { feature: "Lead", used, limit });
     return next();
   } catch (error) {
@@ -95,7 +136,7 @@ export const canCreateLead = async (req, res, next) => {
 /** Hard block on routes that require any paid plan (e.g. remove-branding). */
 export const requireActiveSubscription = async (req, res, next) => {
   try {
-    const user = await resolveUser(req);
+    const user = await resolveUserDoc(req);
     if (!user) return res.status(404).json({ success: false, message: "User not found" });
     if (!isSubscriptionActive(user.subscription)) {
       return res.status(402).json({
