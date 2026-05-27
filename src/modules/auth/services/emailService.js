@@ -8,7 +8,12 @@ import {
 } from '../utils/tokenUtils.js';
 
 const clientUrl = () =>
-  process.env.CLIENT_URL || process.env.FRONTEND_URL || 'http://localhost:8080';
+  (
+    process.env.FRONTEND_URL ||
+    process.env.CLIENT_URL ||
+    process.env.NETTWIN_FRONTEND_URL ||
+    'http://localhost:8080'
+  ).replace(/\/$/, '');
 
 const formatDate = (date) => {
   if (!date) return '';
@@ -23,6 +28,37 @@ const formatDate = (date) => {
   }
 };
 
+const escapeHtml = (value) =>
+  String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+const brandedEmail = ({ eyebrow = 'NetTwin', title, body, ctaLabel, ctaUrl, footer }) => `
+  <!doctype html>
+  <html>
+  <body style="margin:0;padding:0;background:#05050f;font-family:Inter,Arial,Helvetica,sans-serif;color:#e2e8f0;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#05050f;padding:28px 12px;">
+      <tr><td align="center">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;background:linear-gradient(135deg,#0b1120 0%,#111837 52%,#1e1b4b 100%);border:1px solid rgba(139,92,246,0.34);border-radius:24px;overflow:hidden;">
+          <tr><td style="padding:34px 30px 18px 30px;">
+            <div style="display:inline-block;padding:7px 12px;border-radius:999px;background:rgba(34,211,238,0.10);border:1px solid rgba(34,211,238,0.24);color:#67e8f9;font-size:12px;letter-spacing:0.12em;text-transform:uppercase;font-weight:700;">${escapeHtml(eyebrow)}</div>
+            <h1 style="margin:18px 0 12px 0;font-size:28px;line-height:1.2;color:#fff;font-weight:800;">${escapeHtml(title)}</h1>
+            <div style="font-size:15px;line-height:1.7;color:#cbd5e1;">${body}</div>
+            <div style="margin:26px 0 8px 0;">
+              <a href="${escapeHtml(ctaUrl)}" style="display:inline-block;padding:14px 24px;border-radius:14px;background:linear-gradient(90deg,#22d3ee 0%,#3b82f6 52%,#a855f7 100%);color:#fff;text-decoration:none;font-weight:800;font-size:15px;">${escapeHtml(ctaLabel)}</a>
+            </div>
+          </td></tr>
+          <tr><td style="padding:18px 30px 26px 30px;border-top:1px solid rgba(139,92,246,0.22);">
+            <p style="margin:0;font-size:12px;line-height:1.6;color:#94a3b8;">${footer}</p>
+          </td></tr>
+        </table>
+      </td></tr>
+    </table>
+  </body>
+  </html>`;
+
 /**
  * Email service for NetTwin. Verification, password reset, and billing
  * notifications all funnel through the same Nodemailer transport configured
@@ -35,15 +71,13 @@ const emailService = {
   async sendVerificationEmail(user, token) {
     try {
       const link = `${clientUrl()}/verify-email?token=${encodeURIComponent(token)}`;
-      const html = `
-        <div style="font-family:Inter,system-ui,sans-serif;color:#0f172a;max-width:560px;margin:0 auto">
-          <h2>Confirm your NetTwin email</h2>
-          <p>Hi ${user.name || 'there'}, please confirm your email by clicking the button below. This link expires in 24 hours.</p>
-          <p>
-            <a href="${link}" style="display:inline-block;padding:12px 24px;background:#0ea5e9;color:#fff;border-radius:8px;text-decoration:none;font-weight:600">Verify email</a>
-          </p>
-          <p style="color:#64748b;font-size:13px">If the button doesn't work, paste this link into your browser:<br/>${link}</p>
-        </div>`;
+      const html = brandedEmail({
+        title: 'Confirm your NetTwin email',
+        body: `<p style="margin:0 0 12px 0;">Hi ${escapeHtml(user.name || 'there')}, confirm your email to keep your NetTwin account secure. This link expires in 24 hours.</p>`,
+        ctaLabel: 'Verify Email',
+        ctaUrl: link,
+        footer: "If you did not create a NetTwin account, you can ignore this email.",
+      });
       const text = `Verify your NetTwin email: ${link}`;
       const result = await sendMail({
         to: user.email,
@@ -51,9 +85,6 @@ const emailService = {
         html,
         text,
       });
-      if (!result.delivered) {
-        console.log(`[EMAIL] (fallback) verification token for ${user.email}: ${token}`);
-      }
       return true;
     } catch (error) {
       console.error('Error sending verification email:', error);
@@ -65,25 +96,20 @@ const emailService = {
   async sendPasswordResetEmail(user, token) {
     try {
       const link = `${clientUrl()}/reset-password?token=${encodeURIComponent(token)}`;
-      const html = `
-        <div style="font-family:Inter,system-ui,sans-serif;color:#0f172a;max-width:560px;margin:0 auto">
-          <h2>Reset your NetTwin password</h2>
-          <p>Hi ${user.name || 'there'}, click the button below to set a new password. This link expires in 1 hour.</p>
-          <p>
-            <a href="${link}" style="display:inline-block;padding:12px 24px;background:#0ea5e9;color:#fff;border-radius:8px;text-decoration:none;font-weight:600">Reset password</a>
-          </p>
-          <p style="color:#64748b;font-size:13px">If you didn't request this, you can safely ignore this email.</p>
-        </div>`;
-      const text = `Reset your NetTwin password: ${link}`;
+      const html = brandedEmail({
+        title: 'Reset your NetTwin password',
+        body: `<p style="margin:0 0 12px 0;">Hi ${escapeHtml(user.name || 'there')}, use the secure button below to create a new password. This recovery link expires in 1 hour.</p><p style="margin:0;color:#94a3b8;">If you did not request this, no action is needed.</p>`,
+        ctaLabel: 'Reset Password',
+        ctaUrl: link,
+        footer: "For your security, this link can only be used once and expires automatically.",
+      });
+      const text = `Reset your NetTwin password: ${link}\n\nThis link expires in 1 hour. If you did not request this, ignore this email.`;
       const result = await sendMail({
         to: user.email,
         subject: 'Reset your NetTwin password',
         html,
         text,
       });
-      if (!result.delivered) {
-        console.log(`[EMAIL] (fallback) password reset token for ${user.email}: ${token}`);
-      }
       return true;
     } catch (error) {
       console.error('Error sending reset email:', error);
@@ -209,7 +235,10 @@ const emailService = {
     try {
       const user = await User.findOne({ email: email.toLowerCase() });
       if (!user) {
-        throw new Error('User not found');
+        return {
+          success: true,
+          message: 'If an account exists with that email, a reset link has been sent'
+        };
       }
 
       // Generate token
@@ -243,12 +272,19 @@ const emailService = {
 
       const user = await User.findOne({ passwordResetToken: tokenHash });
       if (!user) {
-        throw new Error('Invalid password reset token');
+        const error = new Error('Invalid or expired password reset link');
+        error.statusCode = 400;
+        throw error;
       }
 
       // Check expiry
       if (new Date() > user.passwordResetTokenExpiry) {
-        throw new Error('Password reset token expired');
+        user.passwordResetToken = undefined;
+        user.passwordResetTokenExpiry = undefined;
+        await user.save();
+        const error = new Error('Invalid or expired password reset link');
+        error.statusCode = 400;
+        throw error;
       }
 
       // Hash new password

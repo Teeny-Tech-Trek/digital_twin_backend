@@ -219,7 +219,7 @@ export const logout = asyncHandler(async (req, res) => {
 export const forgotPassword = asyncHandler(async (req, res) => {
   const { email } = req.body;
 
-  const result = await emailService.sendPasswordResetTokenForUser(email);
+  await emailService.sendPasswordResetTokenForUser(email);
 
   // For security, always return success (don't leak if email exists)
   res.json({
@@ -236,6 +236,12 @@ export const forgotPassword = asyncHandler(async (req, res) => {
 export const resetPassword = asyncHandler(async (req, res) => {
   const { token } = req.params;
   const { password } = req.body;
+  if (!token) {
+    return res.status(400).json({
+      success: false,
+      message: 'Invalid or expired password reset link'
+    });
+  }
 
   const result = await emailService.resetPasswordWithToken(token, password);
 

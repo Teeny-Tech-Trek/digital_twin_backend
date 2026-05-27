@@ -87,6 +87,9 @@ const authLimiter = rateLimit({
 //      a code change. Whitespace around commas is trimmed.
 //   4. Any localhost:<port> origin (covers Vite/CRA dev servers).
 const hardcodedOrigins = [
+  "http://localhost:3000",
+  "http://localhost:5173",
+  "http://localhost:8080",
   "https://nettwin-test.vercel.app",       // Vercel preview / staging
   "https://nettwin.techtrekkers.ai",       // production frontend
   "https://digitaltwin.techtrekkers.ai",   // legacy production frontend
@@ -99,6 +102,8 @@ const extraOrigins = (process.env.ADDITIONAL_ALLOWED_ORIGINS || "")
 
 const allowedOrigins = [
   process.env.CLIENT_URL,
+  process.env.FRONTEND_URL,
+  process.env.NETTWIN_FRONTEND_URL,
   ...hardcodedOrigins,
   ...extraOrigins,
 ].filter(Boolean);
@@ -127,7 +132,13 @@ app.use(
       return callback(new Error(`CORS blocked origin: ${origin}`));
     },
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Requested-With",
+      "X-Internal-Token",
+      "X-Internal-Api-Key",
+    ],
     credentials: true,
     maxAge: 86400 // 24 hours
   })

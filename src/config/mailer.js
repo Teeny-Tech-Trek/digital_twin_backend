@@ -10,6 +10,7 @@
 //   SMTP_USER     gmail address / SMTP login
 //   SMTP_PASS     app password (NOT your normal Gmail password)
 //   SMTP_FROM     "NetTwin <noreply@yourdomain.com>"
+//   MAIL_FROM     Alternative sender env used by newer NetTwin services.
 
 import nodemailer from "nodemailer";
 
@@ -49,6 +50,7 @@ const getTransport = () => {
 };
 
 export const getFromAddress = () =>
+  process.env.MAIL_FROM ||
   process.env.SMTP_FROM ||
   (process.env.SMTP_USER ? `NetTwin <${process.env.SMTP_USER}>` : "NetTwin <no-reply@nettwin.local>");
 
@@ -63,7 +65,7 @@ export const sendMail = async ({ to, subject, html, text }) => {
 
   if (!transport) {
     console.log(`[MAILER:STUB] To=${to} Subject="${subject}"`);
-    if (text) console.log(text);
+    console.log("[MAILER:STUB] Email body suppressed in logs to avoid leaking secure links or tokens.");
     return { delivered: false, stub: true };
   }
 

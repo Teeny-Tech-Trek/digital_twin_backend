@@ -92,12 +92,6 @@ export const forgotPasswordSchema = Joi.object({
 
 // Password reset validation
 export const resetPasswordSchema = Joi.object({
-  token: Joi.string()
-    .required()
-    .messages({
-      'string.empty': 'Reset token is required'
-    }),
-
   password: Joi.string()
     .min(8)
     .max(100)
