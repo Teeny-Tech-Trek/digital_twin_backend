@@ -20,6 +20,9 @@ import {
 } from "../controllers/digitalTwinIngestController.js";
 
 const router = express.Router();
+// TEMPORARY: rate limiting disabled for QA/testing when
+// DISABLE_RATE_LIMIT=true. MUST be re-enabled before large-scale public
+// launch. Mirrors the same flag used by apiLimiter/authLimiter in server.js.
 const ingestionPollLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 1000,
@@ -30,6 +33,7 @@ const ingestionPollLimiter = rateLimit({
     error: "RATE_LIMITED",
     message: "Too many ingestion polling requests. Please slow down and try again.",
   },
+  skip: () => process.env.DISABLE_RATE_LIMIT === "true",
 });
 
 // Single-twin-per-user model. There used to be a /list endpoint for

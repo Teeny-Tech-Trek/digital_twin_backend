@@ -57,12 +57,21 @@ app.use(express.urlencoded({ limit: '10mb', extended: true }));
 app.use(cookieParser());
 
 // ✅ Rate Limiting
+//
+// TEMPORARY: rate limiting can be globally disabled for QA/testing by
+// setting DISABLE_RATE_LIMIT=true in the environment. The limiter
+// middleware stays mounted so re-enabling is a single env-var flip — no
+// code change needed. MUST be re-enabled (DISABLE_RATE_LIMIT unset or
+// false) before large-scale public launch.
+const RATE_LIMITS_DISABLED = process.env.DISABLE_RATE_LIMIT === "true";
+
 // General API rate limiter
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 100, // limit each IP to 100 requests per windowMs
   message: 'Too many requests from this IP, please try again later.',
   skip: (req) =>
+    RATE_LIMITS_DISABLED ||
     req.path.startsWith("/api/digital-twin/jobs/") ||
     req.path === "/api/digital-twin/ingestion-status" ||
     req.path === "/api/digital-twin/internal/ingest-complete" ||
@@ -74,8 +83,18 @@ const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 5, // limit each IP to 5 login attempts per windowMs
   skipSuccessfulRequests: true, // don't count successful requests
-  message: 'Too many failed login attempts, please try again later.'
+  message: 'Too many failed login attempts, please try again later.',
+  // TEMPORARY: same DISABLE_RATE_LIMIT flag as apiLimiter above.
+  skip: () => RATE_LIMITS_DISABLED,
 });
+
+if (RATE_LIMITS_DISABLED) {
+  // eslint-disable-next-line no-console
+  console.warn(
+    "[RATE-LIMIT] DISABLE_RATE_LIMIT=true — all express-rate-limit gates are bypassed. " +
+      "This is intended for QA/testing only and MUST be turned off before public launch."
+  );
+}
 
 // ✅ CORS Configuration
 //
@@ -215,6 +234,11 @@ app.use("/api/auth", authRoutes);
 // Other API routes
 app.use("/api/digital-twin", digitalTwinRoutes);
 app.use("/api/chat", chatRoutes);
+// NetTwin public twin chat uses POST /api/v1/twins/:twinId/chat. Mount the
+// same chatRoutes router on that path so quota gating, message persistence
+// (powers billing usage counts), and auto-lead capture all keep working —
+// same controller, same proxy to the AI engine's /v1/twins/{tid}/chat.
+app.use("/api/v1/twins/:twinId/chat", chatRoutes);
 app.use("/api/leads", leadRoutes);
 
 // Billing (centralized TTT Payment Service integration).

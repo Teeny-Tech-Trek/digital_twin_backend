@@ -39,14 +39,19 @@ const persistTurn = async (twinId, userMessage, assistantReply) => {
 // ----------------------------------------------------------------------
 // Primary path: AI backend hybrid RAG.
 // ----------------------------------------------------------------------
-const replyViaAiEngine = async ({ twinId, messages, userEmail }) => {
-  const sessionId =
+const replyViaAiEngine = async ({ twinId, messages, userEmail, sessionId }) => {
+  // Prefer the caller-supplied sessionId (persisted on the frontend, keyed
+  // per twin). Falling back to a derived id keeps backwards compatibility
+  // with callers that don't pass one, but the caller-supplied path is what
+  // keeps conversation memory continuous across turns for the visitor.
+  const resolvedSessionId =
+    sessionId ||
     messages.find((m) => m.sessionId)?.sessionId ||
     `twin-${twinId}-${userEmail || "anon"}`;
   const result = await aiEngine.chat({
     twinId,
     messages,
-    sessionId,
+    sessionId: resolvedSessionId,
     userId: userEmail || "anonymous",
     userEmail,
   });
@@ -185,7 +190,7 @@ const replyViaOpenAiFallback = async (twin, messages) => {
 // ----------------------------------------------------------------------
 // Public entrypoint
 // ----------------------------------------------------------------------
-export const chatWithDigitalTwin = async (twinId, messages, userEmail) => {
+export const chatWithDigitalTwin = async (twinId, messages, userEmail, sessionId = null) => {
   const twin = await DigitalTwin.findById(twinId);
   if (!twin) {
     const error = new Error("Digital twin not found");
@@ -200,7 +205,7 @@ export const chatWithDigitalTwin = async (twinId, messages, userEmail) => {
 
   let aiReply = null;
   try {
-    aiReply = await replyViaAiEngine({ twinId, messages, userEmail });
+    aiReply = await replyViaAiEngine({ twinId, messages, userEmail, sessionId });
   } catch (err) {
     console.warn(`[chat] AI engine threw, falling back to OpenAI:`, err.message);
   }

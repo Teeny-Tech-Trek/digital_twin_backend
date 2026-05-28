@@ -289,6 +289,16 @@ export const chat = async ({ twinId, messages, sessionId, userId = "anonymous", 
     return { ok: false, error: { code: "EMPTY_QUERY", message: "No user message to send." } };
   }
 
+  // session_id is required by the AI engine's request schema. If the caller
+  // didn't pass one we fall back to a per-request id, but loudly warn —
+  // that means upstream (Node controller or frontend) lost the visitor's
+  // persistent id and we just broke conversation memory continuity.
+  if (!sessionId) {
+    console.warn(
+      `[aiEngineClient] chat called without sessionId for twin=${twinId} — falling back to per-request id. ` +
+        `Check that the frontend includes sessionId in the chat body and that the Node controller forwards it.`
+    );
+  }
   try {
     const res = await axios.post(
       // Path-style twin chat — easier to grep in AI-backend logs than the

@@ -3,6 +3,44 @@ import aiEngine from "./aiEngineClient.js";
 import { sanitizeDigitalTwinPayload } from "../utils/digitalTwinPayload.js";
 
 /**
+ * Stamp the AI sync outcome on the twin doc so the dashboard can surface
+ * "AI engine not in sync" with a one-click retry. Never throws — observability
+ * must not break the write path that called it.
+ */
+const stampSyncResult = async (twin, result) => {
+  if (!twin) return;
+  const now = new Date();
+  try {
+    if (result?.ok) {
+      twin.aiSyncStatus = {
+        state: "synced",
+        lastAttemptAt: now,
+        lastSyncedAt: now,
+        lastError: "",
+      };
+    } else {
+      twin.aiSyncStatus = {
+        state: "failed",
+        lastAttemptAt: now,
+        lastSyncedAt: twin.aiSyncStatus?.lastSyncedAt || null,
+        lastError:
+          result?.error?.message ||
+          result?.error?.code ||
+          "AI engine sync failed",
+      };
+    }
+    // Mongoose can miss nested-subdoc reassignments in change tracking.
+    // Mark explicitly so the field actually persists on .save().
+    twin.markModified("aiSyncStatus");
+    await twin.save();
+  } catch (err) {
+    console.warn(
+      `[twin] could not persist aiSyncStatus for twin=${twin._id}: ${err.message}`
+    );
+  }
+};
+
+/**
  * Single-twin-per-user service layer.
  *
  * Each user owns AT MOST one DigitalTwin document, enforced by the unique
@@ -133,6 +171,7 @@ export const createOrUpdateDigitalTwin = async (userId, data) => {
       aiResult.error?.message
     );
   }
+  await stampSyncResult(digitalTwin, aiResult);
 
   return digitalTwin;
 };
@@ -174,6 +213,7 @@ export const updateSection = async (userId, section, sectionData) => {
       aiResult.error?.message
     );
   }
+  await stampSyncResult(digitalTwin, aiResult);
 
   return digitalTwin;
 };
@@ -218,5 +258,7 @@ export const resyncDigitalTwin = async (userId) => {
     err.statusCode = 404;
     throw err;
   }
-  return aiEngine.syncTwin({ twinId: digitalTwin._id, twin: digitalTwin });
+  const aiResult = await aiEngine.syncTwin({ twinId: digitalTwin._id, twin: digitalTwin });
+  await stampSyncResult(digitalTwin, aiResult);
+  return aiResult;
 };

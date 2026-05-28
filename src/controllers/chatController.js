@@ -12,6 +12,11 @@ import * as leadService from "../services/leadService.js";
 export const sendMessage = asyncHandler(async (req, res) => {
   const body = req.body || {};
   const { twinId, messages, userEmail } = body;
+  // Accept both camelCase (NetTwin frontend) and snake_case (any external
+  // consumer that mirrors the AI engine's contract). Either reaches the
+  // engine as session_id so conversation memory stays continuous across
+  // turns instead of being regenerated on every request.
+  const sessionId = body.sessionId || body.session_id || null;
 
   // Explicit 400 with field-level detail. Throwing a plain Error without a
   // status code falls through to Express's default handler as a 500, which
@@ -30,7 +35,7 @@ export const sendMessage = asyncHandler(async (req, res) => {
 
   let reply;
   try {
-    reply = await chatService.chatWithDigitalTwin(twinId, messages, userEmail);
+    reply = await chatService.chatWithDigitalTwin(twinId, messages, userEmail, sessionId);
   } catch (error) {
     const status = error.statusCode || 500;
     return res.status(status).json({

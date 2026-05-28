@@ -8,7 +8,10 @@ import asyncHandler from "../middleware/asyncHandler.js";
 import DigitalTwin from "../models/DigitalTwin.js";
 import aiEngine from "../services/aiEngineClient.js";
 import { maybeSendTwinReadyEmail } from "../services/twinNotificationService.js";
-import { ensureDraftDigitalTwin } from "../services/digitalTwinService.js";
+import {
+  ensureDraftDigitalTwin,
+  resyncDigitalTwin,
+} from "../services/digitalTwinService.js";
 
 const INTERNAL_TOKEN_HEADER = "x-internal-token";
 
@@ -348,8 +351,11 @@ export const extractedProfile = asyncHandler(async (req, res) => {
  * the AI backend was down during a save, or after restoring from backup.
  */
 export const resyncProfile = asyncHandler(async (req, res) => {
-  const twin = await resolveCallerTwin(req);
-  const result = await aiEngine.syncTwin({ twinId: twin._id, twin });
+  // Route through the service so aiSyncStatus gets stamped on the twin
+  // doc — the dashboard banner reads from that field to decide whether
+  // to show the "Retry sync" prompt. Calling aiEngine.syncTwin directly
+  // here would skip the stamp and the banner would never clear.
+  const result = await resyncDigitalTwin(req.user._id);
   if (!result.ok) {
     return res.status(502).json({
       success: false,

@@ -93,6 +93,28 @@ const digitalTwinSchema = new mongoose.Schema(
     //          missing as undefined which falsy-checks the same).
     // Date  -> emailed at this moment, do not resend until manually reset.
     aiReadyEmailSentAt: { type: Date, default: null },
+    // Visibility into the AI-engine sync. The Mongo write is always the
+    // source of truth, but the AI engine push (FAISS + profile.json) can
+    // silently fail at create/update time — see the swallowed try/catch
+    // in services/digitalTwinService.js. Stamping the outcome here lets
+    // the dashboard surface "AI engine not in sync — chat may return
+    // generic answers" with a one-click retry.
+    //
+    // state values:
+    //   "never"  -> never attempted (legacy docs, drafts). Default.
+    //   "synced" -> last syncTwin call returned ok.
+    //   "failed" -> last syncTwin call returned an error. lastError holds
+    //               the message.
+    aiSyncStatus: {
+      state: {
+        type: String,
+        enum: ["never", "synced", "failed"],
+        default: "never",
+      },
+      lastAttemptAt: { type: Date, default: null },
+      lastSyncedAt: { type: Date, default: null },
+      lastError: { type: String, default: "" },
+    },
   },
   { timestamps: true }
 );
