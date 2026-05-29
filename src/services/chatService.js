@@ -39,6 +39,28 @@ const persistTurn = async (twinId, userMessage, assistantReply) => {
 // ----------------------------------------------------------------------
 // Primary path: AI backend hybrid RAG.
 // ----------------------------------------------------------------------
+// Patterns the AI engine emits when its RAG pipeline can't produce a
+// grounded answer. We treat these as soft failures and degrade to the
+// OpenAI profile-grounded fallback so visitors get a contextual reply
+// instead of a "contact me directly" template — important for demos
+// where the AI engine may have weak retrieval for a brand-new twin.
+const AI_ENGINE_FALLBACK_FRAGMENTS = [
+  "I attempted to generate a response but want to ensure accuracy",
+  "Rather than risk providing incorrect information",
+  "I don't have enough relevant information about this topic",
+  "I don't have specific information about that in my portfolio",
+  "I want to make sure I provide you with accurate information",
+  "I'm most knowledgeable about:",
+];
+
+const looksLikeAiEngineFallback = (reply) => {
+  if (!reply || typeof reply !== "string") return true;
+  const lower = reply.toLowerCase();
+  return AI_ENGINE_FALLBACK_FRAGMENTS.some((frag) =>
+    lower.includes(frag.toLowerCase()),
+  );
+};
+
 const replyViaAiEngine = async ({ twinId, messages, userEmail, sessionId }) => {
   // Prefer the caller-supplied sessionId (persisted on the frontend, keyed
   // per twin). Falling back to a derived id keeps backwards compatibility
@@ -57,6 +79,18 @@ const replyViaAiEngine = async ({ twinId, messages, userEmail, sessionId }) => {
   });
   if (!result.ok) {
     return null; // signal caller to try fallback
+  }
+  // Demo-friendly soft-fail: if the AI engine returned its generic
+  // "I don't have that info" template OR its raw response flags
+  // fallback_triggered=true, treat as a miss so we can degrade to the
+  // OpenAI profile-grounded reply. Visitors get a real contextual answer
+  // instead of a dead-end refusal.
+  const fallbackFlag = result.raw?.fallback_triggered === true;
+  if (fallbackFlag || looksLikeAiEngineFallback(result.reply)) {
+    console.warn(
+      `[chat] AI engine returned fallback for twin=${twinId} (flag=${fallbackFlag}); degrading to OpenAI profile fallback`,
+    );
+    return null;
   }
   return result.reply;
 };
@@ -112,7 +146,10 @@ const buildSystemPrompt = (twin) => {
   const networking = twin.networking || {};
 
   return `You are the digital twin of ${fmt(identity.name, "this professional")}.
-You answer as them, in first person, grounded ONLY in the profile below. Do not invent companies, roles, years of experience, projects, or credentials that aren't listed. If asked about something not in the profile, say you don't have that information handy and offer to follow up.
+You answer as them, warmly and in first person, drawing on the profile below.
+- Treat the profile as your source of truth for FACTS (company names, role titles, dates, credentials, projects). Never fabricate those.
+- For broader conversational topics (perspectives on your industry, how you approach work, what excites you, general advice in your domain), you may engage thoughtfully using the profile as your character. Stay in character and stay reasonable.
+- If a visitor asks about something not in the profile and not inferable, acknowledge briefly and pivot to what you CAN share — don't just refuse.
 
 === Identity ===
 Name: ${fmt(identity.name)}
@@ -153,11 +190,13 @@ Intent: ${fmt(networking.intent)}
 Boundaries: ${fmt(networking.boundaries)}
 
 === Response guidelines ===
-- First person, voice matches the Tone above (default to professional + warm if Tone is missing).
-- Keep replies under ~150 words unless asked to elaborate.
-- Use ONLY facts from the profile. Do not fabricate companies, durations, metrics, or stories.
-- If a visitor expresses interest in partnership/contact/business, acknowledge and invite them to share their email so you (the human) can follow up.
-- End with a short question that moves the conversation forward when natural — not on every message.`;
+- First person, voice matches the Tone above (default to professional + warm + curious if Tone is missing).
+- Keep replies natural and concise — typically 2-4 short paragraphs or a tight bullet list. Avoid wall-of-text.
+- Hard facts (company names, role titles, durations, metrics, project names, credentials) MUST come from the profile.
+- For perspective questions ("how do you think about X", "what's your approach to Y"), reason in character using the profile as your background — don't refuse just because the exact answer isn't in the profile.
+- If a visitor expresses interest in partnership/contact/business, acknowledge warmly and invite them to share their email so the human counterpart can follow up.
+- End with a short, relevant follow-up question when it feels natural — not on every message.
+- Never use phrases like "I don't have details about that in my portfolio knowledge base" or "rather than risk providing incorrect information". Just answer warmly with what you know.`;
 };
 
 const replyViaOpenAiFallback = async (twin, messages) => {
